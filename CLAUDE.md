@@ -66,19 +66,20 @@ Mediacaster is a web-based MPEG-TS multicast playout system. Users upload media 
 
 ## Known Issues / TODO
 
-### Critical
-1. **Browser source multicast output not reaching receivers** — Container runs, ffmpeg captures x11grab, but no packets arrive at multicast receivers. Playlist streams work fine on the same network. Likely a `--network=host` + multicast routing issue in Podman 5.6. Need to debug: check `ip route` inside container, check if ffmpeg is actually writing packets, test with `tcpdump` on the host interface.
-2. **noVNC preview not scaling to 16:9 in iframe** — The `vnc_lite.html` view connects but doesn't respect `resize=scale`. Current workaround is using `vnc.html` (has sidebar) or direct port connection. CSS transform scaling on the iframe container may be the fix.
+### Resolved (2026-03-17)
+1. ~~**Browser source multicast output not reaching receivers**~~ — Fixed. Root causes: (a) `ip` binary is in `/usr/sbin/` which wasn't in the systemd service PATH, causing multicast interface detection to fail silently; (b) ffmpeg had no explicit `localaddr=` binding so packets went to the wrong interface. Fix: browser_manager.py now uses `/usr/sbin/ip` to detect the host NIC IP and passes `MULTICAST_IFACE_ADDR` to the container. Also requires `ip route add 239.0.0.0/8 dev <iface>` on the host (deploy.sh handles this but it may not persist across reboots).
+2. ~~**noVNC preview not scaling to 16:9 in iframe**~~ — Fixed. Created custom `vnc_embed.html` (in container/) with `scaleViewport=true`, dark background, no UI chrome. Added openbox WM to the container image so Firefox reliably fills the Xvfb framebuffer. Added `browser.window.width/height` prefs for correct initial geometry.
+7. ~~**Code comments and documentation**~~ — Done. All backend, frontend, and infrastructure files have comprehensive inline comments.
+8. ~~**ExecStartPre in systemd**~~ — Fixed. `+` prefix added for root execution.
 
 ### Important
 3. **nginx noVNC proxy doesn't work** — Regex capture variables in `proxy_pass` require a `resolver` directive, and even with one configured it's unreliable. Current workaround: iframe connects directly to websockify port (6080-6180 range opened in firewall). The nginx location block for `/novnc/` exists but isn't functional.
 4. **Default nginx server block in `/etc/nginx/nginx.conf`** — Lines 37-45 must be commented out or our config gets shadowed. deploy.sh should handle this automatically.
 5. **npm deprecation warning** — `deploy.sh` uses `--production=false`, should be `--include=dev`
+6. **Multicast route persistence** — `ip route add 239.0.0.0/8 dev <iface>` doesn't reliably survive reboots. deploy.sh uses `/etc/sysconfig/network-scripts/route-multicast` which is deprecated on AL10. Needs a NetworkManager dispatcher script or systemd-networkd route.
 
 ### Nice to Have
-6. **Migrate CRA to Vite** — CRA is abandoned, npm audit will always scream
-7. **Code comments and documentation** — codebase needs comprehensive inline comments with human-readable variable names
-8. **ExecStartPre in systemd** — needs `+` prefix for root execution (creating /run/user dir)
+7. **Migrate CRA to Vite** — CRA is abandoned, npm audit will always scream
 
 ## Code Style Preferences
 - **Comments:** All generated code should be well-commented with explanatory inline comments
