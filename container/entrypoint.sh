@@ -178,7 +178,9 @@ H=$(echo "${RESOLUTION}" | cut -d'x' -f2)
 for attempt in 1 2 3 4 5; do
     # Search by WM_CLASS (more reliable than window name, which changes
     # with every page navigation). Firefox's WM_CLASS is always "Navigator".
-    WINDOW_ID=$(xdotool search --class Navigator 2>/dev/null | head -1)
+    # || true prevents set -e + pipefail from killing the script when
+    # xdotool returns non-zero (no windows found yet)
+    WINDOW_ID=$(xdotool search --class Navigator 2>/dev/null | head -1 || true)
     if [[ -n "${WINDOW_ID}" ]]; then
         # Move to origin, resize to full framebuffer, then tell openbox
         # to maximize (handles any WM chrome/offset openbox might add)
