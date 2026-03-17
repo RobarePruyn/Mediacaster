@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+venv/
+
+# Node
+frontend/node_modules/
+frontend/build/
+
+# Application data
+db/
+media/
+uploads/
+thumbnails/
+playlists/
+
+# OS
+.DS_Store
+*.swp

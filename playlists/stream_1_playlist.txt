@@ -1,0 +1,1 @@
+file '/opt/multicast-streamer/media/asset_3.mp4'

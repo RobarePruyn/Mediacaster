@@ -1,0 +1,66 @@
+# Browser Source Container — AlmaLinux 9 base
+# Provides the X11 stack that AL10 dropped (Xvfb, x11vnc, xdotool)
+# Each instance runs: Xvfb → Firefox → x11vnc → websockify → ffmpeg x11grab
+
+FROM almalinux:9
+
+# Install EPEL + RPM Fusion for ffmpeg
+RUN dnf install -y epel-release && \
+    dnf config-manager --set-enabled crb && \
+    dnf install -y \
+        https://mirrors.rpmfusion.org/free/el/rpmfusion-free-release-9.noarch.rpm \
+        https://mirrors.rpmfusion.org/nonfree/el/rpmfusion-nonfree-release-9.noarch.rpm && \
+    dnf install -y \
+        firefox \
+        ffmpeg \
+        xorg-x11-server-Xvfb \
+        x11vnc \
+        xdotool \
+        python3 \
+        python3-pip \
+        python3-numpy \
+        pulseaudio \
+        pulseaudio-utils \
+        mesa-dri-drivers \
+        liberation-fonts \
+        google-noto-sans-fonts \
+        xdg-utils \
+        dbus-x11 \
+        procps-ng \
+    && dnf clean all
+
+# Install websockify and noVNC
+RUN pip3 install websockify && \
+    dnf install -y git && \
+    git clone --depth 1 https://github.com/novnc/noVNC.git /opt/novnc && \
+    ln -sf /opt/novnc/vnc.html /opt/novnc/index.html && \
+    dnf remove -y git && \
+    dnf clean all
+
+# Create a non-root user for the browser
+RUN useradd -m -s /bin/bash browseruser && \
+    usermod -a -G audio,video browseruser
+
+# Copy entrypoint script
+COPY entrypoint.sh /opt/entrypoint.sh
+RUN chmod +x /opt/entrypoint.sh
+
+# Environment defaults (overridden at runtime)
+ENV DISPLAY_NUM=50 \
+    RESOLUTION=1920x1080 \
+    FRAMERATE=30 \
+    URL=about:blank \
+    MULTICAST_ADDR=239.1.1.1 \
+    MULTICAST_PORT=5000 \
+    MULTICAST_TTL=16 \
+    VNC_PORT=5950 \
+    NOVNC_PORT=6080 \
+    CAPTURE_AUDIO=false \
+    VIDEO_BITRATE=8M \
+    AUDIO_BITRATE=128k
+
+# VNC and noVNC ports (mapped dynamically by podman)
+EXPOSE ${VNC_PORT} ${NOVNC_PORT}
+
+USER browseruser
+ENTRYPOINT ["/opt/entrypoint.sh"]
