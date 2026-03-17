@@ -52,9 +52,15 @@ def _detect_host_multicast_ip() -> str:
     Falls back to empty string if detection fails, in which case ffmpeg uses
     the kernel's default routing (which works if the multicast route exists).
     """
+    # ip lives in /usr/sbin on RHEL/AlmaLinux, which may not be in the
+    # systemd service's PATH. Try both common locations.
+    ip_cmd = "/usr/sbin/ip"
+    if not os.path.exists(ip_cmd):
+        ip_cmd = "ip"  # Fall back to PATH lookup
+
     try:
         result = subprocess.run(
-            ["ip", "route", "get", "1.1.1.1"],
+            [ip_cmd, "route", "get", "1.1.1.1"],
             capture_output=True, text=True, timeout=5,
         )
         if result.returncode == 0:
@@ -62,6 +68,7 @@ def _detect_host_multicast_ip() -> str:
             parts = result.stdout.split()
             if "src" in parts:
                 return parts[parts.index("src") + 1]
+        logger.warning("ip route get returned code %d: %s", result.returncode, result.stderr)
     except (subprocess.TimeoutExpired, OSError, IndexError, ValueError) as exc:
         logger.warning("Failed to detect host multicast interface IP: %s", exc)
     return ""
