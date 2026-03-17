@@ -1,10 +1,27 @@
-# Browser Source Container — AlmaLinux 9 base
-# Provides the X11 stack that AL10 dropped (Xvfb, x11vnc, xdotool)
-# Each instance runs: Xvfb → Firefox → x11vnc → websockify → ffmpeg x11grab
+# ==========================================================================
+# Browser Source Container — Containerfile
+# ==========================================================================
+# Builds the container image used for browser source capture streams.
+# Each running instance renders a URL in a headless Firefox, captures the
+# virtual display via ffmpeg x11grab, and outputs MPEG-TS over UDP multicast.
+#
+# Why AlmaLinux 9?
+#   AlmaLinux 10 dropped the X11 server stack entirely (Wayland-only), but
+#   we need Xvfb for headless screen capture because ffmpeg's x11grab input
+#   requires an X11 display. AL9 still ships Xvfb and the full X11 toolchain.
+#
+# Runtime pipeline per container:
+#   Xvfb (virtual framebuffer) → Firefox (kiosk mode) → x11vnc (VNC server)
+#   → websockify/noVNC (browser-based VNC preview) → ffmpeg x11grab (capture
+#   + encode to H.264/AAC → MPEG-TS UDP multicast output)
+# ==========================================================================
 
 FROM almalinux:9
 
-# Install EPEL + RPM Fusion for ffmpeg
+# EPEL provides x11vnc, xdotool, and other tools not in the base repos.
+# CRB (CodeReady Builder, formerly PowerTools) unlocks build dependencies.
+# RPM Fusion provides ffmpeg, which is not in RHEL/AlmaLinux base repos
+# due to patent/licensing concerns with H.264 and other codecs.
 RUN dnf install -y epel-release && \
     dnf config-manager --set-enabled crb && \
     dnf install -y \
@@ -19,39 +36,60 @@ RUN dnf install -y epel-release && \
         python3 \
         python3-pip \
         python3-numpy \
+        # PulseAudio provides a virtual audio sink for capturing browser audio
+        # (e.g., web pages that play sound). pactl is in pulseaudio-utils.
         pulseaudio \
         pulseaudio-utils \
+        # Mesa DRI drivers prevent GLX errors in Firefox on the virtual display
         mesa-dri-drivers \
+        # Font packages so rendered web pages don't show missing-glyph boxes
         liberation-fonts \
         google-noto-sans-fonts \
+        # xdg-utils and dbus-x11 prevent Firefox warnings about missing
+        # desktop integration (default browser checks, IPC, etc.)
         xdg-utils \
         dbus-x11 \
+        # procps-ng provides ps/top — useful for debugging inside the container
         procps-ng \
     && dnf clean all
 
-# Install websockify and noVNC
+# websockify bridges a raw TCP VNC connection to a WebSocket, allowing
+# the noVNC HTML5 client to connect from a browser. noVNC is cloned as
+# static files served by websockify's built-in web server (--web flag).
 RUN pip3 install websockify && \
     dnf install -y git && \
     git clone --depth 1 https://github.com/novnc/noVNC.git /opt/novnc && \
+    # noVNC serves index.html by default; symlink vnc.html so the root
+    # URL loads the full VNC client (with sidebar/controls)
     ln -sf /opt/novnc/vnc.html /opt/novnc/index.html && \
+    # Remove git after cloning — not needed at runtime, saves image size
     dnf remove -y git && \
     dnf clean all
 
-# Create a non-root user for the browser
+# Run Firefox as a non-root user for security. The audio and video groups
+# grant access to PulseAudio and GPU devices if present.
 RUN useradd -m -s /bin/bash browseruser && \
     usermod -a -G audio,video browseruser
 
-# Copy entrypoint script
 COPY entrypoint.sh /opt/entrypoint.sh
 RUN chmod +x /opt/entrypoint.sh
 
-# Environment defaults (overridden at runtime)
+# Custom noVNC embed page for iframe-friendly scaling — no sidebar, no controls,
+# just a full-viewport canvas with scaleViewport=true. Used by the StreamPanel.
+COPY vnc_embed.html /opt/novnc/vnc_embed.html
+
+# Environment defaults — the browser_manager service overrides these at
+# container launch time via podman run --env for each browser source instance.
+# DISPLAY_NUM is offset per container to avoid X11 display collisions.
 ENV DISPLAY_NUM=50 \
     RESOLUTION=1920x1080 \
     FRAMERATE=30 \
     URL=about:blank \
     MULTICAST_ADDR=239.1.1.1 \
     MULTICAST_PORT=5000 \
+    # TTL 16 is sufficient for site-local multicast; typical campus/building
+    # networks use TTL 1-32. Higher values risk leaking multicast traffic
+    # to upstream routers.
     MULTICAST_TTL=16 \
     VNC_PORT=5950 \
     NOVNC_PORT=6080 \
@@ -59,8 +97,10 @@ ENV DISPLAY_NUM=50 \
     VIDEO_BITRATE=8M \
     AUDIO_BITRATE=128k
 
-# VNC and noVNC ports (mapped dynamically by podman)
+# Expose VNC (raw) and noVNC (websocket) ports. When running with
+# --network=host these are accessed directly; otherwise podman maps them.
 EXPOSE ${VNC_PORT} ${NOVNC_PORT}
 
+# Drop to non-root for the runtime process
 USER browseruser
 ENTRYPOINT ["/opt/entrypoint.sh"]

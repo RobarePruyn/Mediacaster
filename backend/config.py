@@ -1,53 +1,93 @@
 """
 Configuration management for the Multicast Streamer application.
-All settings can be overridden via environment variables prefixed with MCS_.
+
+Centralizes all tunable parameters in one place. Every setting can be
+overridden via an environment variable prefixed with ``MCS_`` — this allows
+deploy.sh and systemd to customize behavior without editing code.
+
+Settings are organized into sections:
+  - Filesystem paths (media storage, database, playlists)
+  - Transcode profile (ffmpeg encoding parameters for upload normalization)
+  - Streaming defaults (multicast addressing, resource limits)
+  - Auth (JWT secret, token lifetime, default admin credentials)
+  - External tool paths (ffmpeg, ffprobe binaries)
+
+Note: Some of these values (transcode resolution, multicast TTL, etc.) can
+also be changed at runtime via the Settings API, which persists them to the
+``server_settings`` table. The env vars here set the *initial* defaults.
 """
 
 import os
 from pathlib import Path
 
-# Filesystem paths
+# ── Filesystem paths ──────────────────────────────────────────────────────────
+# BASE_DIR is the root installation directory. All data subdirectories live here.
 BASE_DIR = Path(os.getenv("MCS_BASE_DIR", "/opt/multicast-streamer"))
-MEDIA_DIR = BASE_DIR / "media"
-UPLOAD_DIR = BASE_DIR / "uploads"
-THUMBNAIL_DIR = BASE_DIR / "thumbnails"
-DATABASE_PATH = BASE_DIR / "db" / "streamer.db"
-CONCAT_DIR = BASE_DIR / "playlists"
+MEDIA_DIR = BASE_DIR / "media"            # Transcoded media files ready for playout
+UPLOAD_DIR = BASE_DIR / "uploads"          # Raw uploaded files (pre-transcode)
+THUMBNAIL_DIR = BASE_DIR / "thumbnails"    # Auto-generated video/image thumbnails
+DATABASE_PATH = BASE_DIR / "db" / "streamer.db"  # SQLite database file
+CONCAT_DIR = BASE_DIR / "playlists"        # ffmpeg concat-demuxer playlist text files
 
-# Transcode profile — all uploads normalized to this for reliable playout
+# ── Transcode profile ────────────────────────────────────────────────────────
+# All uploaded media is normalized to this profile before playout. This ensures
+# every asset has identical codec, resolution, and framerate — required for
+# seamless ffmpeg concat-demuxer switching between playlist items.
 TRANSCODE_VIDEO_CODEC = "libx264"
-TRANSCODE_VIDEO_PROFILE = "main"
-TRANSCODE_VIDEO_PRESET = "medium"
-TRANSCODE_VIDEO_BITRATE = "8M"
-TRANSCODE_VIDEO_MAXRATE = "8M"
-TRANSCODE_VIDEO_BUFSIZE = "16M"
+TRANSCODE_VIDEO_PROFILE = "main"       # H.264 profile (main = broad compatibility)
+TRANSCODE_VIDEO_PRESET = "medium"      # Encoding speed vs compression tradeoff
+TRANSCODE_VIDEO_BITRATE = "8M"         # Target bitrate for CBR-like output
+TRANSCODE_VIDEO_MAXRATE = "8M"         # VBV max rate — keeps bitrate predictable
+TRANSCODE_VIDEO_BUFSIZE = "16M"        # VBV buffer size — 2x maxrate is typical
 TRANSCODE_RESOLUTION = os.getenv("MCS_TRANSCODE_RESOLUTION", "1920x1080")
 TRANSCODE_FRAMERATE = os.getenv("MCS_TRANSCODE_FRAMERATE", "30")
 TRANSCODE_AUDIO_CODEC = "aac"
 TRANSCODE_AUDIO_BITRATE = "128k"
-TRANSCODE_AUDIO_CHANNELS = "2"
-TRANSCODE_AUDIO_SAMPLERATE = "48000"
+TRANSCODE_AUDIO_CHANNELS = "2"         # Stereo — broadcast standard
+TRANSCODE_AUDIO_SAMPLERATE = "48000"   # 48kHz — broadcast standard (not 44.1kHz)
+
+# Duration in seconds for static images when converted to video assets.
+# Images become a black video of this length with the image composited on top.
 STATIC_IMAGE_DURATION = int(os.getenv("MCS_IMAGE_DURATION", "10"))
 
-# Streaming defaults
+# ── Streaming defaults ────────────────────────────────────────────────────────
 DEFAULT_MULTICAST_ADDRESS = os.getenv("MCS_DEFAULT_MCAST_ADDR", "239.1.1.1")
 DEFAULT_MULTICAST_PORT = int(os.getenv("MCS_DEFAULT_MCAST_PORT", "5000"))
+# TTL controls how many router hops multicast packets can traverse.
+# 16 is generous for a LAN; production environments may want 1-4.
 MULTICAST_TTL = int(os.getenv("MCS_MULTICAST_TTL", "16"))
+
+# Resource guardrails — the system refuses to start new streams if these
+# thresholds would be exceeded, preventing server overload.
 MAX_CONCURRENT_STREAMS = int(os.getenv("MCS_MAX_STREAMS", "8"))
 MAX_CPU_UTILIZATION_PERCENT = float(os.getenv("MCS_MAX_CPU_PCT", "80.0"))
+MAX_MEMORY_UTILIZATION_PERCENT = float(os.getenv("MCS_MAX_MEM_PCT", "80.0"))
 MAX_BANDWIDTH_UTILIZATION_PERCENT = float(os.getenv("MCS_MAX_BW_PCT", "80.0"))
+# Link speed of the primary NIC in Mbps — used for bandwidth capacity estimation.
+# Auto-detection is unreliable with bonded/virtual interfaces, so this is manual.
+NETWORK_LINK_SPEED_MBPS = float(os.getenv("MCS_LINK_SPEED_MBPS", "1000.0"))
 
-# Auth
+# ── Auth ──────────────────────────────────────────────────────────────────────
+# IMPORTANT: SECRET_KEY must be changed in production — it signs all JWT tokens.
 SECRET_KEY = os.getenv("MCS_SECRET_KEY", "CHANGE-ME-IN-PRODUCTION-please")
+# Token lifetime: 480 minutes = 8 hours (one broadcast shift)
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("MCS_TOKEN_EXPIRE_MIN", "480"))
+# Default admin credentials — created on first run if no admin exists.
+# The admin is forced to change the password on first login.
 DEFAULT_ADMIN_USERNAME = os.getenv("MCS_ADMIN_USER", "admin")
 DEFAULT_ADMIN_PASSWORD = os.getenv("MCS_ADMIN_PASS", "changeme")
+# CORS origins — comma-separated list. "*" allows all (fine for dev, restrict in prod).
 CORS_ORIGINS = os.getenv("MCS_CORS_ORIGINS", "*").split(",")
 
-# External tool paths
+# ── External tool paths ───────────────────────────────────────────────────────
+# Absolute paths to ffmpeg/ffprobe binaries. Override if they're installed
+# in a non-standard location (e.g., a custom build in /usr/local/bin/).
 FFMPEG_PATH = os.getenv("MCS_FFMPEG_PATH", "/usr/bin/ffmpeg")
 FFPROBE_PATH = os.getenv("MCS_FFPROBE_PATH", "/usr/bin/ffprobe")
 
-# Ensure directories exist at import time
+# ── Directory initialization ─────────────────────────────────────────────────
+# Create all required data directories at import time so the rest of the
+# application can assume they exist. parents=True handles nested paths,
+# exist_ok=True makes it idempotent.
 for _dir in [MEDIA_DIR, UPLOAD_DIR, THUMBNAIL_DIR, DATABASE_PATH.parent, CONCAT_DIR]:
     _dir.mkdir(parents=True, exist_ok=True)

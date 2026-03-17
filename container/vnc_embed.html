@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<!--
+  vnc_embed.html — Minimal noVNC client optimized for iframe embedding.
+
+  Designed for the Mediacaster StreamPanel browser source preview. Unlike
+  vnc_lite.html (which has its own layout assumptions) or vnc.html (which
+  has a sidebar), this page:
+    - Fills 100% of the iframe with the VNC canvas (no chrome, no controls)
+    - Always enables scaleViewport so the remote desktop fits the iframe
+    - Uses a dark background matching the parent app's broadcast UI aesthetic
+    - Auto-connects on load using URL query parameters
+    - Auto-reconnects on disconnect (configurable delay)
+
+  Query parameters (set by StreamPanel.jsx):
+    autoconnect=true    Connect immediately on page load
+    reconnect=true      Automatically reconnect on disconnect
+    reconnect_delay=ms  Delay before reconnect attempt (default 3000)
+    show_dot=true       Show a dot cursor instead of hiding it
+    path=websockify     WebSocket path (default: websockify for websockify)
+-->
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Browser Source Preview</title>
+    <style>
+        /* Fill the entire iframe with no margins or scrollbars */
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        html, body {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background: #0a0e17; /* Match --bg-base from the parent app */
+        }
+        /* noVNC renders into this container — the RFB object creates a
+           <canvas> child that it sizes to match the remote framebuffer.
+           With scaleViewport=true, the canvas scales down (or up) to fit. */
+        #screen {
+            width: 100%;
+            height: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #000;
+        }
+        /* Status overlay — shown briefly during connect/reconnect */
+        #status {
+            position: absolute;
+            bottom: 8px;
+            left: 50%;
+            transform: translateX(-50%);
+            padding: 4px 12px;
+            background: rgba(0, 0, 0, 0.7);
+            color: #8b95a5;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+            border-radius: 4px;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.3s;
+            z-index: 10;
+        }
+        #status.visible { opacity: 1; }
+    </style>
+</head>
+<body>
+    <div id="screen"></div>
+    <div id="status"></div>
+
+    <script type="module">
+        // Import the RFB (Remote Framebuffer) class directly from noVNC's
+        // core module — no need for the full UI framework
+        import RFB from './core/rfb.js';
+
+        // ── Parse URL query parameters ──────────────────────────────────
+        const params = new URLSearchParams(window.location.search);
+        const autoconnect = params.get('autoconnect') !== 'false';
+        const reconnect = params.get('reconnect') === 'true';
+        const reconnectDelay = parseInt(params.get('reconnect_delay') || '3000', 10);
+        const showDot = params.get('show_dot') === 'true';
+
+        // ── Status display helper ───────────────────────────────────────
+        const statusEl = document.getElementById('status');
+        let statusTimeout;
+        function showStatus(msg, duration = 3000) {
+            statusEl.textContent = msg;
+            statusEl.classList.add('visible');
+            clearTimeout(statusTimeout);
+            if (duration > 0) {
+                statusTimeout = setTimeout(() => {
+                    statusEl.classList.remove('visible');
+                }, duration);
+            }
+        }
+
+        // ── Build the WebSocket URL ─────────────────────────────────────
+        // The iframe is loaded from http://host:novnc_port/vnc_embed.html
+        // so the WebSocket connects back to the same host:port via ws://
+        const wsScheme = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
+        const wsPath = params.get('path') || 'websockify';
+        const wsUrl = `${wsScheme}${window.location.host}/${wsPath}`;
+
+        // ── Connect to VNC ──────────────────────────────────────────────
+        let rfb = null;
+
+        function connect() {
+            if (rfb) {
+                rfb.disconnect();
+                rfb = null;
+            }
+
+            showStatus('Connecting...', 0);
+
+            rfb = new RFB(document.getElementById('screen'), wsUrl, {});
+
+            // Scale the remote framebuffer to fit the iframe viewport.
+            // This is the key setting that makes 1920x1080 remote displays
+            // render correctly in a smaller iframe without scrollbars.
+            rfb.scaleViewport = true;
+
+            // Don't resize the remote session — we want to capture at
+            // the configured resolution (1920x1080) and scale locally
+            rfb.resizeSession = false;
+
+            // Cursor handling: show_dot renders a small dot cursor so
+            // the operator can see where they're pointing in the preview
+            rfb.showDotCursor = showDot;
+
+            // Compression quality — favor speed over quality for live preview
+            rfb.qualityLevel = 6;
+            rfb.compressionLevel = 2;
+
+            rfb.addEventListener('connect', () => {
+                showStatus('Connected', 1500);
+            });
+
+            rfb.addEventListener('disconnect', (e) => {
+                const clean = e.detail.clean;
+                if (reconnect && !clean) {
+                    showStatus(`Disconnected — reconnecting in ${reconnectDelay / 1000}s...`, 0);
+                    setTimeout(connect, reconnectDelay);
+                } else if (!clean) {
+                    showStatus('Disconnected', 0);
+                }
+            });
+
+            rfb.addEventListener('credentialsrequired', () => {
+                // No password set on x11vnc (-nopw flag), so this shouldn't
+                // fire. If it does, send empty credentials to avoid a prompt.
+                rfb.sendCredentials({ password: '' });
+            });
+        }
+
+        // ── Auto-connect on page load ───────────────────────────────────
+        if (autoconnect) {
+            connect();
+        }
+    </script>
+</body>
+</html>

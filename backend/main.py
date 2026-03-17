@@ -1,6 +1,16 @@
 """
 Multicast Streamer — FastAPI entry point.
-Assembles routes, initializes DB, seeds settings, manages stream lifecycle.
+
+This is the top-level module that bootstraps the entire application:
+  - Registers all API route modules (auth, assets, streams, settings)
+  - Runs SQLite schema migrations on startup
+  - Seeds a default admin user and server settings
+  - Initializes the StreamManager (ffmpeg playlist playout) and
+    BrowserManager (Podman-based browser capture) singletons
+  - Serves the React SPA from the frontend build directory
+  - Gracefully shuts down all active streams on exit
+
+The FastAPI lifespan context manager handles startup/shutdown orchestration.
 """
 
 import logging
@@ -28,7 +38,18 @@ logger = logging.getLogger("main")
 
 
 def _run_migrations(db):
-    """Lightweight SQLite migrations for upgrades — add missing columns."""
+    """
+    Lightweight SQLite schema migrations for upgrades.
+
+    SQLite doesn't support full ALTER TABLE, so we use a simple pattern:
+    try to SELECT the column — if it fails, ADD it. This avoids needing
+    a dedicated migration framework (Alembic) for this small schema.
+
+    Args:
+        db: An active SQLAlchemy Session used to execute raw SQL statements.
+    """
+    # Each tuple: (table_name, column_name, column_definition)
+    # These represent columns added after the initial schema was deployed.
     migrations = [
         ("users", "must_change_password", "BOOLEAN DEFAULT 1"),
         ("assets", "display_name", "VARCHAR(512)"),
@@ -39,23 +60,28 @@ def _run_migrations(db):
     ]
     for table, column, col_type in migrations:
         try:
+            # Probe whether the column exists by selecting from it
             db.execute(text(f"SELECT {column} FROM {table} LIMIT 1"))
         except Exception:
+            # Column doesn't exist yet — add it to the table
             logger.info("Migration: adding %s.%s", table, column)
             db.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"))
             db.commit()
 
-    # Populate display_name from original_filename where null
+    # Backfill display_name for assets created before that column existed.
+    # display_name defaults to the original uploaded filename.
     try:
         db.execute(text(
             "UPDATE assets SET display_name = original_filename "
             "WHERE display_name IS NULL"
         ))
         db.commit()
-    except Exception:
-        pass
+    except Exception as exc:
+        # Non-critical: display_name is cosmetic. Log and continue.
+        logger.warning("display_name backfill skipped: %s", exc)
 
-    # Assign unowned assets to the first admin user
+    # Assign unowned assets to the first admin user so they remain
+    # accessible in the UI after the owner_id column was introduced.
     try:
         db.execute(text(
             "UPDATE assets SET owner_id = ("
@@ -63,13 +89,34 @@ def _run_migrations(db):
             ") WHERE owner_id IS NULL"
         ))
         db.commit()
-    except Exception:
-        pass
+    except Exception as exc:
+        # Non-critical: assets will just appear unowned. Log and continue.
+        logger.warning("owner_id backfill skipped: %s", exc)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
+    """
+    FastAPI lifespan context manager — runs once at startup and shutdown.
+
+    Startup sequence:
+      1. Create database tables (if missing)
+      2. Run column-level migrations
+      3. Seed default admin user (if not present)
+      4. Seed default server settings
+      5. Apply persisted settings to runtime config module
+      6. Initialize StreamManager and BrowserManager
+      7. Restore any browser sources that were running before restart
+
+    Shutdown sequence:
+      1. Stop all active playlist streams (kills ffmpeg processes)
+      2. Stop all browser source containers (podman rm)
+
+    Args:
+        app: The FastAPI application instance. Managers are stored on app.state
+             so route handlers can access them via request.app.state.
+    """
+    # --- Startup ---
     logger.info("Initializing database...")
     init_db()
 
@@ -77,7 +124,7 @@ async def lifespan(app: FastAPI):
     try:
         _run_migrations(db)
 
-        # Create default admin user if it doesn't exist
+        # Create default admin user if the database is fresh or the user was deleted
         if not db.query(User).filter(User.username == DEFAULT_ADMIN_USERNAME).first():
             db.add(User(username=DEFAULT_ADMIN_USERNAME,
                         hashed_password=hash_password(DEFAULT_ADMIN_PASSWORD),
@@ -85,56 +132,72 @@ async def lifespan(app: FastAPI):
             db.commit()
             logger.info("Created default admin user: %s", DEFAULT_ADMIN_USERNAME)
 
-        # Seed default server settings
+        # Seed default server settings (idempotent — skips keys that already exist)
         settings_routes.seed_default_settings(db)
 
-        # Apply persisted settings to runtime config
+        # Push persisted DB settings into the runtime config module so they
+        # take effect immediately (e.g., transcode resolution, multicast TTL)
         settings_routes._apply_runtime_settings(db)
     finally:
         db.close()
 
+    # StreamManager handles ffmpeg concat-demuxer subprocesses for playlist streams.
+    # BrowserManager handles Podman containers for browser source capture.
+    # Both need a session factory to update stream status in the DB independently.
     app.state.stream_manager = StreamManager(db_session_factory=SessionLocal)
     app.state.browser_manager = BrowserManager(db_session_factory=SessionLocal)
 
-    # Restore browser sources that were running before restart
+    # Restore browser sources that were marked as running before a server restart.
+    # This re-launches their Podman containers with the same display/port config.
     try:
         await app.state.browser_manager.restore_sessions()
     except Exception as exc:
         logger.error("Browser session restore failed: %s", exc)
 
     logger.info("Multicast Streamer ready")
-    yield
+    yield  # Application is running — control returns here on shutdown
 
-    # Shutdown
+    # --- Shutdown ---
     logger.info("Stopping all streams and browser sources...")
     await app.state.stream_manager.stop_all()
     await app.state.browser_manager.stop_all()
 
 
+# ── FastAPI application instance ──────────────────────────────────────────────
 app = FastAPI(title="Multicast Streamer",
               description="Media library + MPEG-TS multicast playout",
               version="1.1.0", lifespan=lifespan)
 
+# Allow cross-origin requests from the React dev server (localhost:3000)
+# and any other origins specified via MCS_CORS_ORIGINS env var.
 app.add_middleware(CORSMiddleware, allow_origins=CORS_ORIGINS,
                    allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
+# Register API route modules — all prefixed with /api/ (defined in each router)
 app.include_router(auth_routes.router)
 app.include_router(asset_routes.router)
 app.include_router(stream_routes.router)
 app.include_router(settings_routes.router)
 
-# Serve React frontend
+# ── React SPA static file serving ────────────────────────────────────────────
+# In production, the React app is pre-built into frontend/build/.
+# We serve /static/* directly and route everything else to index.html
+# so that React Router handles client-side navigation.
 FRONTEND_BUILD = Path(__file__).parent.parent / "frontend" / "build"
 if FRONTEND_BUILD.exists():
     app.mount("/static", StaticFiles(directory=FRONTEND_BUILD / "static"), name="static")
 
     @app.get("/{full_path:path}")
     async def serve_spa(full_path: str):
+        """Catch-all route that serves the React SPA's index.html."""
+        # Don't intercept API routes — let FastAPI's router handle those
         if full_path.startswith("api/"):
             return None
         index = FRONTEND_BUILD / "index.html"
         return FileResponse(str(index)) if index.exists() else {"detail": "Frontend not built"}
 else:
+    # Development mode — frontend is served by CRA dev server on :3000
     @app.get("/")
     async def root():
+        """Minimal response when frontend build is not present."""
         return {"message": "API running", "docs": "/docs", "note": "Frontend not built"}

@@ -1,5 +1,14 @@
 /**
- * Login screen — username/password form with error feedback.
+ * Login.jsx — Authentication screen.
+ *
+ * Presents a username/password form styled as a centered card.
+ * On submit, calls the /auth/login endpoint to get a JWT, then immediately
+ * calls /auth/me to fetch the full user profile. Both are needed because:
+ *   - login() returns the JWT + must_change_password flag
+ *   - getCurrentUser() returns the full user object (username, is_admin, etc.)
+ *
+ * The parent (App.jsx) receives both via onLoginSuccess to set up auth state
+ * and potentially trigger the forced password change flow.
  */
 import React, { useState } from 'react';
 import { login, getCurrentUser } from '../api';
@@ -15,7 +24,9 @@ export default function Login({ onLoginSuccess }) {
     setError('');
     setLoading(true);
     try {
+      // First call gets the JWT and stores it in localStorage via api.js
       const loginResponse = await login(username, password);
+      // Second call uses the now-stored JWT to fetch the full user profile
       const user = await getCurrentUser();
       onLoginSuccess(user, loginResponse);
     } catch (err) { setError(err.message); }
@@ -42,6 +53,7 @@ export default function Login({ onLoginSuccess }) {
             <input id="password" type="password" value={password}
               onChange={(e) => setPassword(e.target.value)} required />
           </div>
+          {/* Disabled when loading or when either field is empty to prevent double-submit */}
           <button type="submit" className="btn btn-primary login-btn"
             disabled={loading || !username || !password}>
             {loading ? 'Authenticating...' : 'Sign In'}

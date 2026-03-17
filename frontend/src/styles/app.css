@@ -228,7 +228,8 @@ body { font-family: var(--font-body); font-size: 14px; line-height: 1.5; color: 
 .meter-fill { height: 100%; border-radius: 4px; transition: width 600ms ease; }
 
 /* Capacity cards */
-.capacity-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+/* auto-fit wraps cards naturally as more are added (CPU, memory, bandwidth headroom) */
+.capacity-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
 .capacity-card { text-align: center; padding: 12px; background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--radius-md); }
 .capacity-number { display: block; font-family: var(--font-mono); font-size: 24px; font-weight: 700; color: var(--text-primary); margin-bottom: 4px; }
 .capacity-number.capacity-good { color: var(--status-success); }
@@ -269,7 +270,10 @@ body { font-family: var(--font-body); font-size: 14px; line-height: 1.5; color: 
 .source-type-select { padding: 4px 8px; background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-primary); font-family: var(--font-body); font-size: 12px; cursor: pointer; }
 .source-type-select:focus { outline: none; border-color: var(--border-focus); }
 .browser-preview { background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 14px; margin-bottom: 12px; }
-.novnc-frame { width: 100%; aspect-ratio: 16/9; border: 1px solid var(--border); border-radius: var(--radius-sm); background: #000; margin-top: 8px; }
+/* The iframe loads vnc_embed.html which handles all internal scaling via
+   scaleViewport=true. We just need to give it the right aspect ratio and
+   prevent any overflow from the iframe's content. */
+.novnc-frame { width: 100%; aspect-ratio: 16/9; border: 1px solid var(--border); border-radius: var(--radius-sm); background: #000; margin-top: 8px; display: block; overflow: hidden; }
 
 /* Responsive */
 @media (max-width: 900px) {

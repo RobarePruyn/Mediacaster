@@ -1,0 +1,353 @@
+#!/usr/bin/env bash
+# ===========================================================================
+# Multicast Streamer — AlmaLinux Deployment Script
+# ===========================================================================
+#
+# Takes a fresh AlmaLinux 8, 9, or 10 server and deploys the complete stack:
+#   ffmpeg, Python 3, Node.js 20, nginx, systemd service, firewall, SELinux
+#
+# This script is idempotent — safe to re-run on an already-deployed server.
+# It will skip steps that are already complete (existing user, installed
+# packages, etc.) and overwrite config files with the latest versions.
+#
+# Usage:   sudo bash deploy.sh
+# Custom:  MCS_ADMIN_PASS=secret sudo -E bash deploy.sh
+#
+# ===========================================================================
+
+set -euo pipefail
+
+APP_DIR="/opt/multicast-streamer"
+APP_USER="mcs"
+APP_GROUP="mcs"
+# Python version varies by AlmaLinux release: AL8=3.11, AL9=3.9/3.11, AL10=3.12.
+# We auto-detect after package install rather than hardcoding, since the
+# venv must use whatever python3 binary dnf actually installed.
+NODE_MAJOR_VERSION="20"
+
+# Colors for output
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
+log_info()  { echo -e "${GREEN}[INFO]${NC}  $*"; }
+log_warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
+log_error() { echo -e "${RED}[ERROR]${NC} $*"; }
+log_step()  { echo -e "\n${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"; echo -e "${CYAN}  $*${NC}"; echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"; }
+
+# ---------------------------------------------------------------------------
+# Pre-flight checks
+# ---------------------------------------------------------------------------
+if [[ $EUID -ne 0 ]]; then
+    log_error "This script must be run as root (use sudo)"
+    exit 1
+fi
+
+# Detect AlmaLinux version — used to select the right repo names and
+# RPM Fusion release package URLs (they differ per major version)
+if [[ -f /etc/almalinux-release ]]; then
+    ALMA_VERSION=$(rpm -E %{rhel})
+    log_info "Detected AlmaLinux ${ALMA_VERSION}"
+else
+    log_warn "Not AlmaLinux — proceeding anyway"
+    ALMA_VERSION=$(rpm -E %{rhel} 2>/dev/null || echo "9")
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ---------------------------------------------------------------------------
+# Step 1: Repositories
+# ---------------------------------------------------------------------------
+log_step "Step 1/9: Enabling repositories"
+
+# EPEL (Extra Packages for Enterprise Linux) provides packages not in the
+# base RHEL repos, including x11vnc, xdotool, and other dependencies
+dnf install -y epel-release
+
+# CRB/PowerTools unlocks development headers and libraries needed to build
+# Python packages with native extensions (e.g., psutil, bcrypt)
+if [[ "$ALMA_VERSION" == "8" ]]; then
+    # AlmaLinux 8 calls it "PowerTools" (CentOS 8 naming)
+    dnf config-manager --set-enabled powertools
+    log_info "Enabled PowerTools (AlmaLinux 8)"
+else
+    # AlmaLinux 9+ adopted the RHEL naming: "CRB" (CodeReady Builder)
+    dnf config-manager --set-enabled crb
+    log_info "Enabled CRB (AlmaLinux ${ALMA_VERSION})"
+fi
+
+# RPM Fusion provides ffmpeg and multimedia codecs that Red Hat/AlmaLinux
+# cannot ship due to software patent concerns (H.264, AAC, etc.)
+dnf install -y \
+    "https://mirrors.rpmfusion.org/free/el/rpmfusion-free-release-${ALMA_VERSION}.noarch.rpm" \
+    "https://mirrors.rpmfusion.org/nonfree/el/rpmfusion-nonfree-release-${ALMA_VERSION}.noarch.rpm" \
+    || log_warn "RPM Fusion may already be installed"
+
+# ---------------------------------------------------------------------------
+# Step 2: System packages
+# ---------------------------------------------------------------------------
+log_step "Step 2/9: Installing system packages"
+
+log_info "Installing core packages (ffmpeg, Python, nginx)..."
+dnf install -y \
+    ffmpeg ffmpeg-devel \
+    python3 python3-pip python3-devel \
+    nginx gcc make git curl
+
+# Podman runs browser source containers (containerized Firefox + capture stack).
+# We use Podman instead of Docker because it's the default container runtime
+# on RHEL/AlmaLinux and supports rootless operation.
+log_info "Installing browser source runtime (Podman for containerized browser capture)..."
+dnf install -y podman
+
+# Auto-detect the python3 binary — different AL versions install different
+# minor versions, and the venv/pip must use the matching binary
+PYTHON3_BIN=$(command -v python3)
+PYTHON3_VERSION=$("${PYTHON3_BIN}" --version 2>&1 | awk '{print $2}')
+log_info "Python: ${PYTHON3_VERSION} at ${PYTHON3_BIN}"
+
+if ! command -v ffmpeg &>/dev/null; then
+    log_error "ffmpeg installation failed"
+    exit 1
+fi
+log_info "ffmpeg: $(ffmpeg -version | head -1)"
+
+# ---------------------------------------------------------------------------
+# Step 3: Node.js (for building the React frontend)
+# ---------------------------------------------------------------------------
+log_step "Step 3/9: Installing Node.js ${NODE_MAJOR_VERSION}"
+
+if ! command -v node &>/dev/null; then
+    # NodeSource provides up-to-date Node.js packages for RHEL-based distros.
+    # The setup script adds the repo; then we install from it.
+    curl -fsSL "https://rpm.nodesource.com/setup_${NODE_MAJOR_VERSION}.x" | bash -
+    dnf install -y nodejs
+fi
+log_info "Node: $(node --version)  npm: $(npm --version)"
+
+# ---------------------------------------------------------------------------
+# Step 4: Application user and directories
+# ---------------------------------------------------------------------------
+log_step "Step 4/9: Creating user and directories"
+
+# Create a dedicated system user with no login shell — the app runs as this
+# user via systemd, and it should never be used for interactive login
+if ! id "${APP_USER}" &>/dev/null; then
+    useradd --system --home-dir "${APP_DIR}" --shell /sbin/nologin "${APP_USER}"
+    log_info "Created system user: ${APP_USER}"
+fi
+
+# audio/video groups allow PulseAudio and GPU access inside containers
+usermod -a -G audio,video "${APP_USER}" 2>/dev/null || true
+
+# Podman user namespace mapping requires subuid/subgid ranges allocated
+# to the user. Without this, rootless Podman cannot create user namespaces
+# and container startup fails with permission errors.
+if ! grep -q "^${APP_USER}:" /etc/subuid 2>/dev/null; then
+    log_info "Configuring subuid/subgid for rootless Podman..."
+    usermod --add-subuids 100000-165535 --add-subgids 100000-165535 "${APP_USER}"
+fi
+
+# Podman needs XDG_RUNTIME_DIR to store its socket and temporary state.
+# System users don't get this automatically (no PAM session), so we
+# create it manually. The systemd service also creates it via ExecStartPre.
+mkdir -p "/run/user/$(id -u ${APP_USER})"
+chown "${APP_USER}:${APP_GROUP}" "/run/user/$(id -u ${APP_USER})"
+
+# Lingering keeps the user's systemd slice active even when no session exists,
+# which is required for Podman containers to persist after deployment
+loginctl enable-linger "${APP_USER}" 2>/dev/null || true
+
+# Create the data directories — media/uploads/thumbnails hold user content,
+# db holds the SQLite database, playlists holds generated ffmpeg concat files
+mkdir -p "${APP_DIR}"/{media,uploads,thumbnails,db,playlists}
+
+# ---------------------------------------------------------------------------
+# Step 5: Deploy application files
+# ---------------------------------------------------------------------------
+log_step "Step 5/9: Deploying application"
+
+cp -r "${SCRIPT_DIR}/backend" "${APP_DIR}/"
+cp "${SCRIPT_DIR}/requirements.txt" "${APP_DIR}/"
+cp -r "${SCRIPT_DIR}/frontend" "${APP_DIR}/"
+
+log_info "Creating Python virtual environment..."
+"${PYTHON3_BIN}" -m venv "${APP_DIR}/venv"
+"${APP_DIR}/venv/bin/pip" install --upgrade pip
+"${APP_DIR}/venv/bin/pip" install -r "${APP_DIR}/requirements.txt"
+
+# Container build files are needed on the server so the image can be rebuilt
+# without re-deploying the entire app
+cp -r "${SCRIPT_DIR}/container" "${APP_DIR}/"
+
+# ---------------------------------------------------------------------------
+# Step 6: Build frontend and container image
+# ---------------------------------------------------------------------------
+log_step "Step 6/9: Building React frontend and browser source container"
+
+cd "${APP_DIR}/frontend"
+# --include=dev ensures devDependencies (react-scripts, build tooling) are
+# installed — they're needed for `npm run build` but not at runtime
+npm install --include=dev
+npm run build
+# Remove node_modules after build — they're not needed at runtime
+# (the built static files in build/ are served by nginx)
+rm -rf node_modules
+log_info "Frontend build complete"
+
+# Build the browser source container image as root — stored in root's podman
+# image store. The mcs user runs containers via `sudo podman` (configured
+# below in sudoers) which gives it access to root's image store.
+log_info "Building browser source container image (this may take a few minutes)..."
+cd "${APP_DIR}/container"
+podman build -t mcs-browser-source:latest -f Containerfile . || {
+    log_warn "Container image build failed — browser sources will not be available"
+    log_warn "Rebuild later: cd ${APP_DIR}/container && sudo podman build -t mcs-browser-source:latest ."
+}
+
+# Grant the mcs user passwordless sudo access to podman only.
+# This is necessary because:
+#   1. --network=host (needed for multicast output) requires root privileges
+#   2. The container image is stored in root's podman storage
+#   3. The mcs user has /sbin/nologin shell and can't run podman rootlessly
+# Security note: this grants full podman control, but podman is scoped to
+# container operations only — it cannot escalate to arbitrary root commands.
+log_info "Configuring sudo access for podman..."
+cat > /etc/sudoers.d/mcs-podman << 'SUDOERS'
+# Allow the multicast streamer service to manage containers
+mcs ALL=(root) NOPASSWD: /usr/bin/podman
+SUDOERS
+chmod 440 /etc/sudoers.d/mcs-podman
+
+# ---------------------------------------------------------------------------
+# Step 7: Permissions
+# ---------------------------------------------------------------------------
+log_step "Step 7/9: Setting ownership and permissions"
+
+chown -R "${APP_USER}:${APP_GROUP}" "${APP_DIR}"
+chmod -R 755 "${APP_DIR}"
+# Data directories need group-write so the app can create files
+chmod 775 "${APP_DIR}"/{media,uploads,thumbnails,db,playlists}
+
+# ---------------------------------------------------------------------------
+# Step 8: Systemd + nginx
+# ---------------------------------------------------------------------------
+log_step "Step 8/9: Configuring services"
+
+cp "${SCRIPT_DIR}/systemd/multicast-streamer.service" /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable multicast-streamer
+
+# Remove the default nginx welcome page config — it would conflict with
+# our server block (both listen on port 80 with server_name _)
+rm -f /etc/nginx/conf.d/default.conf
+cp "${SCRIPT_DIR}/nginx/multicast-streamer.conf" /etc/nginx/conf.d/
+nginx -t
+systemctl enable nginx
+
+# ---------------------------------------------------------------------------
+# Step 9: Firewall + SELinux + multicast routing
+# ---------------------------------------------------------------------------
+log_step "Step 9/9: Firewall, SELinux, and multicast routing"
+
+if systemctl is-active --quiet firewalld; then
+    firewall-cmd --permanent --add-service=http
+    firewall-cmd --permanent --add-service=https
+    # Allow multicast traffic in the 239.0.0.0/8 range (administratively scoped).
+    # Without this rule, firewalld drops outbound multicast UDP packets from
+    # ffmpeg, and receivers see no data even though ffmpeg reports success.
+    firewall-cmd --permanent --add-rich-rule='rule family="ipv4" destination address="239.0.0.0/8" accept'
+    firewall-cmd --reload
+    log_info "Firewall rules applied"
+else
+    log_warn "firewalld not running — skipping"
+fi
+
+if command -v getenforce &>/dev/null && [[ "$(getenforce)" != "Disabled" ]]; then
+    # httpd_can_network_connect allows nginx to proxy to the uvicorn backend.
+    # Without this, SELinux blocks nginx from making outbound TCP connections
+    # and all API requests return 502 Bad Gateway.
+    setsebool -P httpd_can_network_connect 1
+
+    # semanage requires policycoreutils-python-utils — install if missing
+    if ! command -v semanage &>/dev/null; then
+        dnf install -y policycoreutils-python-utils
+    fi
+
+    # Label the app's data directories so nginx (httpd_t context) can
+    # serve uploaded media files and thumbnails directly
+    semanage fcontext -a -t httpd_sys_rw_content_t \
+        "${APP_DIR}/(media|uploads|thumbnails|db|playlists)(/.*)?" 2>/dev/null || true
+    restorecon -Rv "${APP_DIR}/"
+
+    # Register the noVNC websocket port range (6080-6180) as http_port_t
+    # so nginx can proxy WebSocket connections to websockify inside containers.
+    # The -a flag adds; -m modifies if the range overlaps an existing rule.
+    semanage port -a -t http_port_t -p tcp 6080-6180 2>/dev/null || \
+        semanage port -m -t http_port_t -p tcp 6080-6180 2>/dev/null || true
+    # VNC port range (5950-6050) — labeled as http_port_t so SELinux allows
+    # websockify (proxied through nginx) to connect to x11vnc
+    semanage port -a -t http_port_t -p tcp 5950-6050 2>/dev/null || \
+        semanage port -m -t http_port_t -p tcp 5950-6050 2>/dev/null || true
+
+    log_info "SELinux configured"
+fi
+
+# Add a static route for the multicast address range so the kernel knows
+# which interface to send multicast packets out on. Without this, multicast
+# traffic may go to the loopback interface or be dropped entirely, depending
+# on the routing table. We persist it to survive reboots.
+if ! ip route show | grep -q "239.0.0.0/8"; then
+    # Determine the primary network interface by checking which interface
+    # the default route uses (the one that reaches the internet)
+    PRIMARY_IFACE=$(ip route get 1.1.1.1 | awk '{print $5; exit}')
+    if [[ -n "${PRIMARY_IFACE}" ]]; then
+        ip route add 239.0.0.0/8 dev "${PRIMARY_IFACE}" 2>/dev/null || true
+        # Persist the route across reboots via network-scripts
+        mkdir -p /etc/sysconfig/network-scripts
+        echo "239.0.0.0/8 dev ${PRIMARY_IFACE}" > /etc/sysconfig/network-scripts/route-multicast
+        log_info "Multicast route added via ${PRIMARY_IFACE}"
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Start services
+# ---------------------------------------------------------------------------
+log_step "Starting services"
+
+systemctl start multicast-streamer
+systemctl start nginx
+sleep 2
+
+if systemctl is-active --quiet multicast-streamer; then
+    log_info "multicast-streamer is running"
+else
+    log_error "multicast-streamer failed — check: journalctl -u multicast-streamer -n 50"
+fi
+
+if systemctl is-active --quiet nginx; then
+    log_info "nginx is running"
+else
+    log_error "nginx failed — check: journalctl -u nginx -n 50"
+fi
+
+# ---------------------------------------------------------------------------
+# Summary
+# ---------------------------------------------------------------------------
+SERVER_IP=$(hostname -I | awk '{print $1}')
+echo ""
+echo -e "${GREEN}═══════════════════════════════════════════════════════════${NC}"
+echo -e "${GREEN}  Multicast Streamer — Deployment Complete${NC}"
+echo -e "${GREEN}═══════════════════════════════════════════════════════════${NC}"
+echo ""
+echo -e "  Web UI:        ${CYAN}http://${SERVER_IP}/${NC}"
+echo -e "  API Docs:      ${CYAN}http://${SERVER_IP}/docs${NC}"
+echo ""
+echo -e "  Default login:  ${YELLOW}admin / changeme${NC}"
+echo -e "  ${RED}⚠  Change the default password after first login!${NC}"
+echo ""
+echo -e "  Service management:"
+echo -e "    systemctl {start|stop|restart} multicast-streamer"
+echo -e "    journalctl -u multicast-streamer -f"
+echo ""
+echo -e "  Config overrides: MCS_SECRET_KEY, MCS_ADMIN_PASS, MCS_TRANSCODE_RESOLUTION"
+echo -e "  Set via: sudo systemctl edit multicast-streamer"
+echo ""
+echo -e "${GREEN}═══════════════════════════════════════════════════════════${NC}"

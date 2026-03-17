@@ -1,7 +1,15 @@
 /**
- * Password change modal.
- * Shown as a blocking overlay when must_change_password is true (first login),
- * or triggered from the topbar for voluntary changes.
+ * ChangePassword.jsx — Password change modal/overlay.
+ *
+ * Used in two contexts:
+ *   1. Forced mode (isForced=true): Shown as a blocking overlay after first login when the
+ *      backend sets must_change_password=true. The user cannot dismiss it — they must set a
+ *      new password before accessing the application. No cancel button is rendered.
+ *   2. Voluntary mode (isForced=false): Triggered from the Settings > Account panel. The user
+ *      can cancel and return to settings without changing their password.
+ *
+ * Includes client-side validation (minimum length, confirmation match) before hitting
+ * the server, to avoid unnecessary round-trips for obvious input errors.
  */
 import React, { useState } from 'react';
 import { changePassword } from '../api';
@@ -17,7 +25,7 @@ export default function ChangePassword({ isForced, onComplete, onCancel }) {
     e.preventDefault();
     setErrorMessage('');
 
-    // Client-side validation
+    // Client-side validation — catches common mistakes before making a server request
     if (newPassword.length < 8) {
       setErrorMessage('New password must be at least 8 characters');
       return;
@@ -29,6 +37,7 @@ export default function ChangePassword({ isForced, onComplete, onCancel }) {
 
     setIsSubmitting(true);
     try {
+      // Server validates current_password and enforces any additional password policies
       await changePassword(currentPassword, newPassword);
       onComplete();
     } catch (err) {
@@ -43,6 +52,7 @@ export default function ChangePassword({ isForced, onComplete, onCancel }) {
       <div className="modal-card">
         <div className="modal-header">
           <h2>{isForced ? 'Change Default Password' : 'Change Password'}</h2>
+          {/* Explain why this is being shown when it's a forced change */}
           {isForced && (
             <p className="modal-subtitle">
               You must change the default password before continuing.
@@ -96,6 +106,7 @@ export default function ChangePassword({ isForced, onComplete, onCancel }) {
             >
               {isSubmitting ? 'Changing...' : 'Change Password'}
             </button>
+            {/* Cancel button is only shown for voluntary password changes, not forced ones */}
             {!isForced && (
               <button type="button" className="btn btn-ghost" onClick={onCancel}>
                 Cancel

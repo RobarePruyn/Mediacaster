@@ -1,5 +1,25 @@
 /**
- * Stream management panel — handles both playlist and browser source types.
+ * StreamPanel.jsx — Stream management panel for the Dashboard view.
+ *
+ * Handles both stream source types:
+ *   - Playlist streams: ffmpeg concat demuxer → MPEG-TS UDP multicast
+ *   - Browser source streams: Podman container with Xvfb + Firefox + ffmpeg x11grab → multicast
+ *
+ * Features:
+ *   - Stream tab bar with status dot indicators
+ *   - Admin-only stream creation (playlist or browser type selector)
+ *   - Multicast output configuration (address, port, playback mode)
+ *   - Browser source URL/audio configuration
+ *   - noVNC iframe for interactive browser preview (when container is running)
+ *   - Transport controls (Start/Stop/Restart) with live status polling
+ *   - Playlist management: reorder items (up/down), remove items
+ *
+ * RBAC:
+ *   - Admin: create/delete streams, edit all configuration
+ *   - Assigned users: start/stop/restart streams, manage playlist items
+ *
+ * The panel polls stream status every 2 seconds to keep the transport controls
+ * and PID display up to date without requiring the user to manually refresh.
  */
 import React, { useState, useEffect, useCallback } from 'react';
 import {
@@ -9,33 +29,52 @@ import {
 } from '../api';
 
 export default function StreamPanel({ streams, selectedStreamId, onSelectStream, assets, isLoading, onRefresh, isAdmin }) {
+  /** Whether the multicast output config is in edit mode */
   const [editing, setEditing] = useState(false);
+  /** Form state for multicast output config (name, address, port, playback_mode) */
   const [form, setForm] = useState({ name: '', multicast_address: '', multicast_port: '', playback_mode: 'loop' });
+  /** True while a new stream creation request is in-flight */
   const [creating, setCreating] = useState(false);
+  /** Source type selection for the "New" button dropdown */
   const [newSourceType, setNewSourceType] = useState('playlist');
+  /** Live status object from the /status endpoint (includes PID, runtime info) */
   const [liveStatus, setLiveStatus] = useState(null);
+  /** True while a transport control action (start/stop/restart) is in-flight */
   const [busy, setBusy] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
 
-  // Browser config state
+  // --- Browser source config state ---
   const [browserUrl, setBrowserUrl] = useState('');
   const [browserAudio, setBrowserAudio] = useState(false);
+  /** Whether the browser source config section is in edit mode */
   const [editingBrowser, setEditingBrowser] = useState(false);
 
+  /** The currently selected stream object (derived from the streams array) */
   const currentStream = streams.find(s => s.id === selectedStreamId);
+  /** Convenience flag: true if the selected stream is a browser source type */
   const isBrowser = currentStream?.source_type === 'browser';
 
+  /**
+   * Polls the stream status endpoint every 2 seconds.
+   * This keeps the transport control state (running/stopped), PID display,
+   * and container status up to date in real time.
+   */
   const pollStatus = useCallback(async () => {
     if (!selectedStreamId) return;
     try { setLiveStatus(await getStreamStatus(selectedStreamId)); } catch {}
   }, [selectedStreamId]);
 
+  // Set up the 2-second polling interval for stream status
   useEffect(() => {
     pollStatus();
     const interval = setInterval(pollStatus, 2000);
     return () => clearInterval(interval);
   }, [pollStatus]);
 
+  /**
+   * Syncs the form state whenever the selected stream changes.
+   * This ensures the config display/edit fields always reflect the current stream's values.
+   */
   useEffect(() => {
     if (currentStream) {
       setForm({
@@ -44,6 +83,7 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
         multicast_port: String(currentStream.multicast_port),
         playback_mode: currentStream.playback_mode,
       });
+      // Also sync browser source config if this is a browser-type stream
       if (currentStream.browser_source) {
         setBrowserUrl(currentStream.browser_source.url || '');
         setBrowserAudio(currentStream.browser_source.capture_audio || false);
@@ -51,7 +91,12 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
     }
   }, [currentStream]);
 
-  // --- CRUD ---
+  // ─── CRUD Operations ────────────────────────────────────────────────────────
+
+  /**
+   * Creates a new stream with sensible defaults.
+   * Admin-only. After creation, auto-selects the new stream in the tab bar.
+   */
   const handleCreate = async () => {
     setCreating(true); setErrorMsg('');
     try {
@@ -67,6 +112,7 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
     finally { setCreating(false); }
   };
 
+  /** Saves the multicast output configuration (name, address, port, playback mode). */
   const handleSave = async () => {
     if (!selectedStreamId) return; setErrorMsg('');
     try {
@@ -75,6 +121,7 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
     } catch (e) { setErrorMsg(e.message); }
   };
 
+  /** Saves the browser source configuration (URL and audio capture toggle). */
   const handleSaveBrowser = async () => {
     if (!selectedStreamId) return; setErrorMsg('');
     try {
@@ -83,46 +130,70 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
     } catch (e) { setErrorMsg(e.message); }
   };
 
+  /** Deletes the selected stream after a browser confirm dialog. */
   const handleDelete = async () => {
     if (!window.confirm('Delete this stream?')) return;
     try { await deleteStream(selectedStreamId); onSelectStream(null); onRefresh(); }
     catch (e) { setErrorMsg(e.message); }
   };
 
-  // --- Playlist ---
+  // ─── Playlist Operations ────────────────────────────────────────────────────
+
   const handleRemoveItem = async (itemId) => {
     try { await removePlaylistItem(selectedStreamId, itemId); onRefresh(); }
     catch (e) { setErrorMsg(e.message); }
   };
 
+  /**
+   * Moves a playlist item up or down by swapping it with its neighbor.
+   * Sends the entire reordered asset ID list to the backend (not a delta).
+   */
   const handleMoveItem = async (idx, dir) => {
     if (!currentStream) return;
     const items = [...currentStream.items];
     const target = idx + dir;
     if (target < 0 || target >= items.length) return;
+    // Swap the two items in the local copy
     [items[idx], items[target]] = [items[target], items[idx]];
     try { await reorderPlaylist(selectedStreamId, items.map(i => i.asset_id)); onRefresh(); }
     catch (e) { setErrorMsg(e.message); }
   };
 
-  // --- Transport ---
+  // ─── Transport Controls ─────────────────────────────────────────────────────
+
+  /**
+   * Generic wrapper for transport actions (start/stop/restart).
+   * Sets busy state to disable buttons during the request and shows errors on failure.
+   */
   const doAction = async (fn) => {
     setBusy(true); setErrorMsg('');
     try { await fn(); onRefresh(); } catch (e) { setErrorMsg(e.message); }
     finally { setBusy(false); }
   };
 
+  /** True if the stream is currently running or in the process of starting */
   const isRunning = currentStream?.status === 'running' || currentStream?.status === 'starting';
+  /** True if the playlist has at least one fully transcoded asset (required to start) */
   const hasReadyItems = currentStream?.items?.some(i => i.asset.status === 'ready');
+  /**
+   * Determines whether the Start button should be enabled:
+   *   - Browser streams: need a valid URL configured (not the default about:blank)
+   *   - Playlist streams: need at least one ready (fully transcoded) asset
+   */
   const canStart = isBrowser
     ? (currentStream?.browser_source?.url && currentStream.browser_source.url !== 'about:blank')
     : hasReadyItems;
 
-  // noVNC URL — proxied through nginx at /novnc/{port}/
+  /**
+   * Constructs the noVNC URL for the browser source preview iframe.
+   * Connects directly to the websockify port on the server (not proxied through nginx,
+   * because the nginx regex proxy for variable ports is unreliable — see CLAUDE.md).
+   * Query params configure auto-connect, viewport scaling, auto-reconnect, and cursor dot.
+   */
   const novncPort = currentStream?.browser_source?.novnc_port;
   const serverHost = window.location.hostname;
   const novncUrl = (novncPort && isRunning)
-    ? `http://${serverHost}:${novncPort}/vnc_lite.html?autoconnect=true&resize=scale&reconnect=true&scaleViewport=true&show_dot=true&scaleViewport=true&show_dot=true`
+    ? `http://${serverHost}:${novncPort}/vnc_embed.html?autoconnect=true&reconnect=true&show_dot=true`
     : null;
 
   if (isLoading) {
@@ -134,6 +205,7 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
     <div className="stream-panel">
       <div className="panel-header">
         <h2>Stream Output</h2>
+        {/* Admin-only: source type selector + create button */}
         {isAdmin && (
           <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
             <select className="source-type-select" value={newSourceType}
@@ -148,7 +220,7 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
         )}
       </div>
 
-      {/* Stream tabs */}
+      {/* Stream tab bar — each tab shows a status dot (green=running, etc.) and stream name */}
       {streams.length > 0 && (
         <div className="stream-tabs">
           {streams.map(s => (
@@ -166,16 +238,18 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
 
       {!currentStream ? (
         <div className="empty-state">
+          {/* Different empty state messages for admin vs regular user */}
           {streams.length === 0
             ? (isAdmin ? 'No streams configured. Create one to get started.'
                        : 'No channels assigned to you. Ask an administrator.')
             : 'Select a stream above.'}
         </div>
       ) : (<>
-        {/* Multicast config */}
+        {/* ── Multicast output configuration ─────────────────────────────────── */}
         <div className="config-section">
           <div className="config-header">
             <h3>Multicast Output</h3>
+            {/* Edit/Save/Cancel toggle — admin-only */}
             {isAdmin && (
               !editing
                 ? <button className="btn btn-sm btn-ghost" onClick={() => setEditing(true)}>Edit</button>
@@ -197,6 +271,7 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
                 <div className="form-group form-group-sm"><label>Port</label>
                   <input type="number" value={form.multicast_port} onChange={e => setForm({...form, multicast_port: e.target.value})} min="1024" max="65535" /></div>
               </div>
+              {/* Playback mode is only relevant for playlist streams (browser streams are always continuous) */}
               {!isBrowser && (
                 <div className="form-row">
                   <div className="form-group"><label>Playback Mode</label>
@@ -223,7 +298,7 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
           )}
         </div>
 
-        {/* Browser source config (if browser type) */}
+        {/* ── Browser source configuration (only for browser-type streams) ───── */}
         {isBrowser && (
           <div className="config-section">
             <div className="config-header">
@@ -266,7 +341,11 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
           </div>
         )}
 
-        {/* noVNC interactive view (when browser source is running) */}
+        {/*
+          noVNC interactive preview — embedded iframe connecting to websockify in the container.
+          Only shown when the browser source container is actually running and has a noVNC port assigned.
+          Connects directly to the port (bypassing nginx) due to the nginx proxy limitation.
+        */}
         {isBrowser && isRunning && novncPort && (
           <div className="browser-preview">
             <div className="config-header"><h3>Live Browser View (interactive)</h3></div>
@@ -279,12 +358,13 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
           </div>
         )}
 
-        {/* Transport controls */}
+        {/* ── Transport controls (Start/Stop/Restart + status indicator) ──── */}
         <div className="transport-section">
           <div className="transport-status">
             <span className={`status-indicator status-${currentStream.status}`}>
               {currentStream.status.toUpperCase()}
             </span>
+            {/* Show the ffmpeg PID (for playlist streams) or container PID (for browser streams) */}
             {liveStatus?.runtime?.ffmpeg_pid && (
               <span className="mono pid-display">PID {liveStatus.runtime.ffmpeg_pid}</span>
             )}
@@ -305,13 +385,14 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
                 ▶ Start
               </button>
             )}
+            {/* Delete button — admin-only, always visible regardless of stream state */}
             {isAdmin && (
               <button className="btn btn-ghost btn-delete" onClick={handleDelete}>🗑</button>
             )}
           </div>
         </div>
 
-        {/* Playlist (only for playlist source type) */}
+        {/* ── Playlist section (only for playlist-type streams) ──────────── */}
         {!isBrowser && (
           <div className="playlist-section">
             <h3>Playlist ({currentStream.items.length} items)</h3>
@@ -335,6 +416,7 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
                         item.asset.status === 'ready' ? 'badge-success' : 'badge-warning'
                       }`}>{item.asset.status}</span>
                     </div>
+                    {/* Reorder (up/down) and remove buttons for each playlist item */}
                     <div className="playlist-actions">
                       <button className="btn btn-xs btn-ghost" disabled={idx === 0}
                         onClick={() => handleMoveItem(idx, -1)}>▲</button>

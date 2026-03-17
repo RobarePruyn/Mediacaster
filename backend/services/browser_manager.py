@@ -1,23 +1,33 @@
 """
-Browser Source Manager — Podman container-based virtual browser capture.
+Browser Source Manager — Podman container-based virtual browser capture for multicast streaming.
 
 Each browser source runs as an isolated Podman container based on AlmaLinux 9,
-providing the X11 stack (Xvfb, x11vnc, xdotool) that AL10 dropped.
+providing the X11 stack (Xvfb, x11vnc, xdotool) that AlmaLinux 10 dropped
+(AL10 is Wayland-only, but we need X11 for reliable screen capture via x11grab).
 
 Container per source provides:
     - Xvfb virtual display at the configured resolution
     - Firefox in kiosk mode pointed at the configured URL
     - x11vnc for interactive VNC control
-    - websockify/noVNC for web-based interaction (embedded in the UI)
-    - ffmpeg x11grab → MPEG-TS UDP multicast output
+    - websockify/noVNC for web-based interaction (embedded in the UI via iframe)
+    - ffmpeg x11grab capturing the virtual display into MPEG-TS UDP multicast
     - Optional PulseAudio audio capture from the browser
 
-Uses --network=host for direct multicast output capability.
+Uses --network=host so the container can output directly to multicast addresses
+without NAT or port-mapping complications. This is required because multicast
+routing operates at Layer 3 and container bridge networks don't forward multicast.
+
+Port allocation scheme:
+    Each container gets a unique display number (starting at 50), which determines
+    its VNC port (5950 + display) and noVNC/websockify port (6080 + display).
+    These ranges must be open in the firewall (see deploy.sh).
 """
 
 import asyncio
 import logging
 import json
+import os
+import subprocess
 from typing import Dict, Optional
 from sqlalchemy.orm import Session
 from backend import config
@@ -25,45 +35,99 @@ from backend.models import BrowserSource, Stream, StreamStatus
 
 logger = logging.getLogger("browser_manager")
 
+# Container image name — built by deploy.sh or ensure_image_built() from container/Containerfile
 CONTAINER_IMAGE = "mcs-browser-source:latest"
+# Prefix for container names — each gets "{prefix}{stream_id}" for easy identification
 CONTAINER_NAME_PREFIX = "mcs-browser-"
 
-# Port allocation ranges — each container gets a unique pair
+
+def _detect_host_multicast_ip() -> str:
+    """
+    Detect the IP address of the host's primary network interface.
+
+    Used to set localaddr= in ffmpeg's UDP multicast output URL, ensuring
+    packets are sent from the correct NIC rather than relying on the container's
+    routing table (which may not have the multicast route even with --network=host).
+
+    Falls back to empty string if detection fails, in which case ffmpeg uses
+    the kernel's default routing (which works if the multicast route exists).
+    """
+    try:
+        result = subprocess.run(
+            ["ip", "route", "get", "1.1.1.1"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            # Output format: "1.1.1.1 via <gw> dev <iface> src <ip> uid ..."
+            parts = result.stdout.split()
+            if "src" in parts:
+                return parts[parts.index("src") + 1]
+    except (subprocess.TimeoutExpired, OSError, IndexError, ValueError) as exc:
+        logger.warning("Failed to detect host multicast interface IP: %s", exc)
+    return ""
+
+# Port allocation bases — each container offsets from these by its display number
+# Display :50 -> VNC 6000, noVNC 6130; Display :51 -> VNC 6001, noVNC 6131; etc.
 DISPLAY_BASE = 50
 VNC_PORT_BASE = 5950
 NOVNC_PORT_BASE = 6080
 
 
 class ManagedBrowser:
-    """Tracks a running browser source container."""
+    """
+    Tracks a running browser source container's identity and port assignments.
+
+    The display number is the key to all port calculations — VNC and noVNC ports
+    are deterministic offsets from their respective bases.
+    """
     def __init__(self, stream_id: int, display_number: int, container_id: str):
         self.stream_id = stream_id
         self.display_number = display_number
         self.container_id = container_id
+        # Set to True when stop_browser() is called to prevent the watcher from flagging an error
         self.should_stop = False
 
     @property
     def container_name(self):
+        """Podman container name for this browser source (e.g. 'mcs-browser-3')."""
         return f"{CONTAINER_NAME_PREFIX}{self.stream_id}"
 
     @property
     def vnc_port(self):
+        """VNC port for direct VNC client connections (x11vnc listens here)."""
         return VNC_PORT_BASE + self.display_number
 
     @property
     def novnc_port(self):
+        """Websockify port for noVNC browser-based VNC access (embedded in the UI)."""
         return NOVNC_PORT_BASE + self.display_number
 
 
 class BrowserManager:
-    """Manages Podman containers for browser source capture."""
+    """
+    Manages Podman containers for browser source capture and multicast output.
+
+    Handles container lifecycle (start, stop, crash detection), display number
+    allocation to prevent port conflicts, and DB synchronization of port assignments.
+    """
 
     def __init__(self, db_session_factory):
+        # Maps stream_id -> ManagedBrowser for all running browser containers
         self._active: Dict[int, ManagedBrowser] = {}
         self._db_factory = db_session_factory
+        # Tracks which X display numbers are in use to prevent port collisions
         self._used_displays = set()
 
     def _allocate_display(self) -> int:
+        """
+        Allocate the next available X display number.
+
+        Starts at DISPLAY_BASE (50) and increments until finding one not in use.
+        This determines the VNC and noVNC ports for the container.
+
+        Returns:
+            An unused display number (e.g. 50, 51, 52...)
+        """
         display = DISPLAY_BASE
         while display in self._used_displays:
             display += 1
@@ -71,17 +135,39 @@ class BrowserManager:
         return display
 
     def _release_display(self, display: int):
+        """Return a display number to the available pool when a container stops."""
         self._used_displays.discard(display)
 
     def is_active(self, stream_id: int) -> bool:
+        """Check if a browser source container is running for the given stream."""
         return stream_id in self._active
 
     def get_novnc_port(self, stream_id: int) -> Optional[int]:
+        """
+        Get the noVNC websockify port for a running browser source.
+
+        Used by the streams API to tell the frontend which port to connect the
+        noVNC iframe to for live browser preview/interaction.
+
+        Args:
+            stream_id: Database ID of the stream
+
+        Returns:
+            Port number, or None if the browser source isn't running
+        """
         managed = self._active.get(stream_id)
         return managed.novnc_port if managed else None
 
     async def _run_cmd(self, cmd: list) -> tuple:
-        """Run a shell command async, return (returncode, stdout, stderr)."""
+        """
+        Run a shell command asynchronously, capturing stdout and stderr.
+
+        Args:
+            cmd: Command and arguments as a list
+
+        Returns:
+            Tuple of (return_code, stdout_string, stderr_string)
+        """
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -91,8 +177,17 @@ class BrowserManager:
         return proc.returncode, stdout.decode().strip(), stderr.decode().strip()
 
     async def ensure_image_built(self) -> bool:
-        """Build the container image if it doesn't already exist."""
-        # Check if image exists
+        """
+        Ensure the browser source container image exists, building it if necessary.
+
+        Checks for the image first (fast path), then builds from the Containerfile
+        if not found. Looks for the Containerfile relative to this source file first
+        (development), then at the installed location (production /opt/multicast-streamer/).
+
+        Returns:
+            True if the image is available, False if the build failed
+        """
+        # Fast path: check if the image already exists in the local Podman store
         rc, stdout, _ = await self._run_cmd([
             "sudo", "podman", "image", "exists", CONTAINER_IMAGE
         ])
@@ -100,13 +195,13 @@ class BrowserManager:
             logger.info("Container image %s already exists", CONTAINER_IMAGE)
             return True
 
-        # Build the image from the Containerfile
-        import os
+        # Image not found — attempt to build it from the Containerfile
+        # First try the development location (relative to this source file)
         container_dir = os.path.join(
             os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
             "container"
         )
-        # Also check the installed location
+        # Fall back to the production installed location
         if not os.path.exists(os.path.join(container_dir, "Containerfile")):
             container_dir = "/opt/multicast-streamer/container"
 
@@ -130,16 +225,41 @@ class BrowserManager:
 
     async def start_browser(self, stream_id: int, url: str, capture_audio: bool,
                             multicast_address: str, multicast_port: int) -> dict:
-        """Launch a Podman container for browser source capture."""
+        """
+        Launch a Podman container for browser source capture and multicast output.
 
+        The container runs the full stack defined in container/entrypoint.sh:
+        Xvfb -> Firefox kiosk -> x11vnc -> websockify -> ffmpeg x11grab -> UDP multicast.
+
+        Key Podman flags:
+          --network=host: Required for multicast — bridge networks don't forward multicast traffic
+          --shm-size=512m: Firefox needs large shared memory for its multi-process rendering
+                           (default 64MB causes crashes on complex web pages)
+
+        Args:
+            stream_id: Database ID of the stream
+            url: Web URL to load in Firefox kiosk mode
+            capture_audio: Whether to enable PulseAudio capture from the browser
+            multicast_address: Destination multicast group (e.g. "239.1.1.1")
+            multicast_port: Destination UDP port
+
+        Returns:
+            Dict with container_id, display, vnc_port, novnc_port
+
+        Raises:
+            ValueError: If the container image is unavailable or container fails to start
+        """
+
+        # Stop any existing container for this stream before starting a new one
         if stream_id in self._active:
             await self.stop_browser(stream_id)
 
-        # Ensure the container image is built
+        # Ensure the container image is built (may trigger a build on first use)
         if not await self.ensure_image_built():
             raise ValueError("Browser source container image not available. "
                              "Check logs for build errors.")
 
+        # Allocate a unique display number, which determines all port assignments
         display_num = self._allocate_display()
         vnc_port = VNC_PORT_BASE + display_num
         novnc_port = NOVNC_PORT_BASE + display_num
@@ -147,17 +267,26 @@ class BrowserManager:
         resolution = config.TRANSCODE_RESOLUTION
         framerate = config.TRANSCODE_FRAMERATE
 
-        # Remove any stale container with the same name
+        # Remove any stale container with the same name left over from a crash or unclean shutdown
         await self._run_cmd(["sudo", "podman", "rm", "-f", container_name])
 
-        # Build the podman run command
-        # --network=host is required for multicast UDP output
+        # Detect the host's primary interface IP for explicit multicast binding.
+        # Even with --network=host, the container's ffmpeg may not route multicast
+        # correctly without an explicit localaddr= in the UDP URL.
+        host_multicast_ip = _detect_host_multicast_ip()
+        if host_multicast_ip:
+            logger.info("Multicast interface binding: localaddr=%s", host_multicast_ip)
+        else:
+            logger.warning("Could not detect host IP for multicast binding — "
+                           "ffmpeg will rely on kernel routing table")
+
+        # Build the podman run command with all environment variables the entrypoint.sh expects
         podman_cmd = [
             "sudo", "podman", "run",
             "--detach",
             "--name", container_name,
-            "--network=host",              # Required for multicast output
-            "--shm-size=512m",             # Firefox needs shared memory for rendering
+            "--network=host",              # Required: multicast doesn't work over bridge networks
+            "--shm-size=512m",             # Required: Firefox crashes with default 64MB shm
             "-e", f"DISPLAY_NUM={display_num}",
             "-e", f"RESOLUTION={resolution}",
             "-e", f"FRAMERATE={framerate}",
@@ -165,6 +294,7 @@ class BrowserManager:
             "-e", f"MULTICAST_ADDR={multicast_address}",
             "-e", f"MULTICAST_PORT={multicast_port}",
             "-e", f"MULTICAST_TTL={config.MULTICAST_TTL}",
+            "-e", f"MULTICAST_IFACE_ADDR={host_multicast_ip}",
             "-e", f"VNC_PORT={vnc_port}",
             "-e", f"NOVNC_PORT={novnc_port}",
             "-e", f"CAPTURE_AUDIO={'true' if capture_audio else 'false'}",
@@ -177,14 +307,16 @@ class BrowserManager:
         rc, container_id, stderr = await self._run_cmd(podman_cmd)
 
         if rc != 0:
+            # Container failed to start — release the display number and report the error
             self._release_display(display_num)
             raise ValueError(f"Container failed to start: {stderr}")
 
-        container_id = container_id[:12]  # Short ID
+        # Use the short container ID (first 12 chars) for display/logging
+        container_id = container_id[:12]
         managed = ManagedBrowser(stream_id, display_num, container_id)
         self._active[stream_id] = managed
 
-        # Update DB with port assignments
+        # Persist port assignments to DB so the API can serve them to the frontend
         db: Session = self._db_factory()
         try:
             browser = db.query(BrowserSource).filter(
@@ -198,7 +330,7 @@ class BrowserManager:
         finally:
             db.close()
 
-        # Start a background watcher to detect container exit
+        # Start a background task to detect unexpected container exits
         asyncio.create_task(self._watch_container(managed))
 
         logger.info(
@@ -214,23 +346,34 @@ class BrowserManager:
         }
 
     async def stop_browser(self, stream_id: int):
-        """Stop and remove the container for a browser source."""
+        """
+        Stop and remove the Podman container for a browser source.
+
+        Sends SIGTERM via `podman stop` (with 10s grace period for entrypoint.sh to
+        clean up child processes), then force-removes the container.
+
+        Args:
+            stream_id: Database ID of the stream whose browser source to stop
+        """
         managed = self._active.get(stream_id)
         if not managed:
             return
 
+        # Signal the watcher to not treat this exit as an error
         managed.should_stop = True
         container_name = managed.container_name
 
-        # Stop the container (sends SIGTERM to entrypoint, which cleans up children)
+        # podman stop sends SIGTERM to the entrypoint, which should trap it and kill children
+        # -t 10 gives it 10 seconds before podman sends SIGKILL
         logger.info("Stopping browser container %s", container_name)
         await self._run_cmd(["sudo", "podman", "stop", "-t", "10", container_name])
+        # Force remove to clean up the container filesystem even if stop was unclean
         await self._run_cmd(["sudo", "podman", "rm", "-f", container_name])
 
         self._release_display(managed.display_number)
         del self._active[stream_id]
 
-        # Update DB
+        # Clear port assignments in DB since the container is no longer listening
         db: Session = self._db_factory()
         try:
             browser = db.query(BrowserSource).filter(
@@ -247,11 +390,20 @@ class BrowserManager:
         logger.info("Browser source stopped: stream=%d", stream_id)
 
     async def _watch_container(self, managed: ManagedBrowser):
-        """Monitor a container and update state if it exits unexpectedly."""
+        """
+        Poll the container's running state and handle unexpected exits.
+
+        Checks every 5 seconds via `podman inspect`. If the container has exited
+        and should_stop is False (not a user-initiated stop), marks the stream
+        as ERROR in the database so the frontend can display the failure.
+
+        Args:
+            managed: The ManagedBrowser being watched
+        """
         try:
             while not managed.should_stop:
                 await asyncio.sleep(5)
-                # Check if container is still running
+                # Ask Podman if the container is still running
                 rc, stdout, _ = await self._run_cmd([
                     "sudo", "podman", "inspect", "--format", "{{.State.Running}}",
                     managed.container_name,
@@ -260,11 +412,11 @@ class BrowserManager:
                     if not managed.should_stop:
                         logger.warning("Browser container %s exited unexpectedly",
                                        managed.container_name)
-                        # Clean up
+                        # Clean up the tracking state
                         if managed.stream_id in self._active:
                             self._release_display(managed.display_number)
                             del self._active[managed.stream_id]
-                        # Update DB status
+                        # Mark stream as errored in DB so the UI reflects the failure
                         db: Session = self._db_factory()
                         try:
                             stream = db.query(Stream).filter(
@@ -278,6 +430,7 @@ class BrowserManager:
                             db.close()
                     return
         except asyncio.CancelledError:
+            # Watcher cancelled during shutdown — expected, not an error
             pass
         except Exception:
             logger.exception("Error watching container for stream %d",
@@ -285,14 +438,23 @@ class BrowserManager:
 
     def get_browser_pids(self, stream_id: int) -> list:
         """
-        Get PIDs for resource monitoring.
-        With containers, we get the main container PID from podman.
+        Get the container's main PID for resource monitoring via psutil.
+
+        Uses synchronous subprocess (not async) because this is called from
+        the monitoring endpoint which needs immediate results. The PID returned
+        is the container's init process; psutil can then walk its children to
+        find ffmpeg, Firefox, etc.
+
+        Args:
+            stream_id: Database ID of the stream
+
+        Returns:
+            List containing the container's main PID, or empty list if unavailable
         """
         managed = self._active.get(stream_id)
         if not managed:
             return []
-        # We'll get the container's main PID synchronously via subprocess
-        import subprocess
+        # Synchronous subprocess call — this method is called from sync monitoring code
         try:
             result = subprocess.run(
                 ["sudo", "podman", "inspect", "--format", "{{.State.Pid}}",
@@ -303,11 +465,22 @@ class BrowserManager:
                 pid = int(result.stdout.strip())
                 if pid > 0:
                     return [pid]
-        except Exception:
-            pass
+        except subprocess.TimeoutExpired:
+            logger.warning("Timed out getting PID for container %s", managed.container_name)
+        except (ValueError, OSError) as exc:
+            logger.debug("Failed to get container PID for stream %d: %s", stream_id, exc)
         return []
 
     def get_status(self, stream_id: int) -> dict:
+        """
+        Get the runtime status of a browser source for the API.
+
+        Args:
+            stream_id: Database ID of the stream
+
+        Returns:
+            Dict with active state, container info, display/port assignments, and PIDs
+        """
         managed = self._active.get(stream_id)
         if not managed:
             return {"active": False}
@@ -321,12 +494,19 @@ class BrowserManager:
         }
 
     async def stop_all(self):
-        """Stop all active browser containers."""
+        """Stop all active browser containers. Called during application shutdown."""
         for sid in list(self._active.keys()):
             await self.stop_browser(sid)
 
     async def restore_sessions(self):
-        """Restore browser sources that were running before a service restart."""
+        """
+        Restore browser sources that were marked as RUNNING before a service restart.
+
+        On startup, queries the DB for any streams with source_type=BROWSER and
+        status=RUNNING, then attempts to relaunch their containers. This handles
+        the case where the systemd service was restarted but the streams should
+        continue. If a container fails to start, the stream is marked as ERROR.
+        """
         db: Session = self._db_factory()
         try:
             from backend.models import StreamSourceType
