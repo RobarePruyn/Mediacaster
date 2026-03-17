@@ -45,6 +45,10 @@ RUN dnf install -y epel-release && \
         # Font packages so rendered web pages don't show missing-glyph boxes
         liberation-fonts \
         google-noto-sans-fonts \
+        # openbox is a lightweight window manager used in kiosk mode to force
+        # Firefox to fill the entire Xvfb framebuffer. Without a WM, Firefox
+        # in --kiosk mode doesn't reliably maximize (no WM = no maximize hints).
+        openbox \
         # xdg-utils and dbus-x11 prevent Firefox warnings about missing
         # desktop integration (default browser checks, IPC, etc.)
         xdg-utils \

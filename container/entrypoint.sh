@@ -53,6 +53,35 @@ if ! kill -0 "${PIDS[0]}" 2>/dev/null; then
     exit 1
 fi
 
+# ---- 1b. Start openbox (lightweight window manager) ----
+# Without a WM, Firefox's --kiosk mode can't properly maximize — X11 has no
+# concept of "maximized" without a WM to enforce it. openbox is the lightest
+# WM available on AL9 and handles maximize/fullscreen hints from Firefox.
+#
+# The rc.xml config tells openbox to maximize all new windows by default,
+# remove all decorations (title bar, borders), and apply these rules to
+# every window class. This ensures Firefox fills the entire Xvfb framebuffer.
+echo "[entrypoint] Starting openbox window manager"
+mkdir -p /home/browseruser/.config/openbox
+cat > /home/browseruser/.config/openbox/rc.xml << 'OBXML'
+<?xml version="1.0" encoding="UTF-8"?>
+<openbox_config xmlns="http://openbox.org/3.4/rc">
+  <applications>
+    <!-- Force all windows to open maximized with no decorations -->
+    <application class="*">
+      <maximized>yes</maximized>
+      <decor>no</decor>
+    </application>
+  </applications>
+  <!-- Disable all desktop features — this is a kiosk, not a desktop -->
+  <desktops><number>1</number></desktops>
+  <theme><name>Clearlooks</name></theme>
+</openbox_config>
+OBXML
+openbox &
+PIDS+=($!)
+sleep 0.5
+
 # ---- 2. Start PulseAudio (if audio capture enabled) ----
 # When CAPTURE_AUDIO=true, we create a virtual PulseAudio sink that Firefox
 # routes its audio output to. ffmpeg then captures from the sink's "monitor"
@@ -111,6 +140,17 @@ user_pref("full-screen-api.approval-required", false);
 user_pref("dom.disable_window_move_resize", false);
 PREFS
 
+# Append resolution-dependent prefs (can't use variables in a quoted heredoc).
+# These set Firefox's initial window geometry to match the Xvfb framebuffer
+# so it starts at the right size before openbox maximizes it.
+W=$(echo "${RESOLUTION}" | cut -d'x' -f1)
+H=$(echo "${RESOLUTION}" | cut -d'x' -f2)
+cat >> "${PROFILE_DIR}/user.js" << GEOM
+// Initial window geometry — match the Xvfb framebuffer resolution
+user_pref("browser.window.width", ${W});
+user_pref("browser.window.height", ${H});
+GEOM
+
 # --no-remote prevents Firefox from trying to reuse an existing instance.
 # --kiosk renders the page in chromeless fullscreen (no address bar, no tabs).
 firefox \
@@ -125,25 +165,33 @@ echo "[entrypoint] Firefox PID: ${PIDS[-1]}"
 # acceleration can be slow to initialize.
 sleep 4
 
-# Force Firefox window to fill the entire virtual display.
-# --kiosk mode doesn't always maximize properly without a window manager
-# (there's no WM in this container), so we use xdotool to explicitly
-# move and resize the window to cover the full framebuffer.
-echo "[entrypoint] Forcing Firefox to fill display (${RESOLUTION})"
+# Ensure Firefox fills the entire virtual display.
+# openbox's rc.xml config above forces all windows to maximize, but we
+# also use xdotool as a belt-and-suspenders measure to explicitly resize
+# and re-maximize the Firefox window after it's had time to render.
+echo "[entrypoint] Confirming Firefox fills display (${RESOLUTION})"
 W=$(echo "${RESOLUTION}" | cut -d'x' -f1)
 H=$(echo "${RESOLUTION}" | cut -d'x' -f2)
 
-# Retry up to 3 times — Firefox's window may not be mapped yet
-for attempt in 1 2 3; do
-    WINDOW_ID=$(xdotool search --name "" 2>/dev/null | head -1)
+# Retry up to 5 times — Firefox may take a while to create its window,
+# especially on first launch without GPU acceleration.
+for attempt in 1 2 3 4 5; do
+    # Search by WM_CLASS (more reliable than window name, which changes
+    # with every page navigation). Firefox's WM_CLASS is always "Navigator".
+    WINDOW_ID=$(xdotool search --class Navigator 2>/dev/null | head -1)
     if [[ -n "${WINDOW_ID}" ]]; then
+        # Move to origin, resize to full framebuffer, then tell openbox
+        # to maximize (handles any WM chrome/offset openbox might add)
         xdotool windowmove "${WINDOW_ID}" 0 0
         xdotool windowsize "${WINDOW_ID}" "${W}" "${H}"
-        xdotool windowfocus "${WINDOW_ID}"
-        echo "[entrypoint] Window ${WINDOW_ID} resized to ${W}x${H}"
+        xdotool windowactivate "${WINDOW_ID}"
+        # wmctrl-style maximize via xdotool key (openbox listens to these)
+        xdotool key super+Up 2>/dev/null || true
+        echo "[entrypoint] Window ${WINDOW_ID} maximized to ${W}x${H}"
         break
     fi
-    sleep 1
+    echo "[entrypoint] Waiting for Firefox window (attempt ${attempt}/5)..."
+    sleep 2
 done
 
 # ---- 4. Start x11vnc (VNC server for interactive control) ----
