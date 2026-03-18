@@ -76,7 +76,7 @@ Mediacaster is a web-based MPEG-TS multicast playout system. Users upload media 
 3. **nginx noVNC proxy doesn't work** — Regex capture variables in `proxy_pass` require a `resolver` directive, and even with one configured it's unreliable. Current workaround: iframe connects directly to websockify port (6080-6180 range opened in firewall). The nginx location block for `/novnc/` exists but isn't functional.
 4. **Default nginx server block in `/etc/nginx/nginx.conf`** — Lines 37-45 must be commented out or our config gets shadowed. deploy.sh should handle this automatically.
 5. **npm deprecation warning** — `deploy.sh` uses `--production=false`, should be `--include=dev`
-6. **Multicast route persistence** — `ip route add 239.0.0.0/8 dev <iface>` doesn't reliably survive reboots. deploy.sh uses `/etc/sysconfig/network-scripts/route-multicast` which is deprecated on AL10. Needs a NetworkManager dispatcher script or systemd-networkd route.
+6. ~~**Multicast route persistence**~~ — Fixed. NetworkManager dispatcher script at `/etc/NetworkManager/dispatcher.d/99-multicast-route` adds `239.0.0.0/8 dev $1` on interface up. The old deploy.sh approach using `/etc/sysconfig/network-scripts/route-multicast` was unreliable.
 
 ### Nice to Have
 7. **Migrate CRA to Vite** — CRA is abandoned, npm audit will always scream
