@@ -121,8 +121,19 @@ export async function uploadAsset(file, onProgress) {
   });
 }
 
-/** Lists all assets visible to the current user (admin sees all, users see only their own). */
-export async function listAssets() { return apiFetch('/assets'); }
+/**
+ * Lists assets with optional filters for folder, search, and sort.
+ * folder_id: null=all, 0=unfiled, N=specific folder
+ */
+export async function listAssets({ folderId, search, sort, sortDir } = {}) {
+  const params = new URLSearchParams();
+  if (folderId !== undefined && folderId !== null) params.set('folder_id', folderId);
+  if (search) params.set('search', search);
+  if (sort) params.set('sort', sort);
+  if (sortDir) params.set('sort_dir', sortDir);
+  const qs = params.toString();
+  return apiFetch(`/assets${qs ? '?' + qs : ''}`);
+}
 export async function getAsset(id) { return apiFetch(`/assets/${id}`); }
 export async function deleteAsset(id) { return apiFetch(`/assets/${id}`, { method: 'DELETE' }); }
 /** Renames the display name of an asset (does not change the underlying filename on disk). */
@@ -217,6 +228,33 @@ export async function assignStreamUsers(streamId, userIds) {
 
 /** Fetches disk usage stats for the media storage directory. */
 export async function getStorageInfo() { return apiFetch('/assets/storage'); }
+
+// ─── Folders ──────────────────────────────────────────────────────────────────
+
+/** Lists all folders visible to the current user (flat list). */
+export async function listFolders() { return apiFetch('/folders'); }
+/** Gets the full folder tree as a nested structure. */
+export async function getFolderTree() { return apiFetch('/folders/tree'); }
+/** Gets a single folder's details. */
+export async function getFolder(id) { return apiFetch(`/folders/${id}`); }
+/** Creates a new folder. */
+export async function createFolder(name, parentId = null) {
+  return apiFetch('/folders', { method: 'POST', body: JSON.stringify({ name, parent_id: parentId }) });
+}
+/** Renames or moves a folder. */
+export async function updateFolder(id, data) {
+  return apiFetch(`/folders/${id}`, { method: 'PUT', body: JSON.stringify(data) });
+}
+/** Sets folder sharing options (admin only). */
+export async function updateFolderSharing(id, isShared, shareMode = 'read_only') {
+  return apiFetch(`/folders/${id}/share`, { method: 'PUT', body: JSON.stringify({ is_shared: isShared, share_mode: shareMode }) });
+}
+/** Deletes a folder (assets become unfiled). */
+export async function deleteFolder(id) { return apiFetch(`/folders/${id}`, { method: 'DELETE' }); }
+/** Moves assets into a folder (or unfiled with folderId=null). */
+export async function moveAssets(assetIds, folderId = null) {
+  return apiFetch('/folders/move-assets', { method: 'POST', body: JSON.stringify({ asset_ids: assetIds, folder_id: folderId }) });
+}
 
 // ─── Monitoring ───────────────────────────────────────────────────────────────
 

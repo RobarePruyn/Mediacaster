@@ -9,11 +9,12 @@ Mediacaster is a web-based MPEG-TS multicast playout system. Users upload media 
 - **Entry:** `backend/main.py` — FastAPI app, lifespan (startup/shutdown), DB migrations, default admin seeding
 - **Config:** `backend/config.py` — centralized config with `MCS_*` env var overrides
 - **Database:** `backend/database.py` — SQLAlchemy engine, PostgreSQL (via psycopg2)
-- **Models:** `backend/models.py` — User, Asset (VIDEO/IMAGE/AUDIO), Stream (PLAYLIST/BROWSER source types), StreamItem, BrowserSource, UserStreamAssignment, ServerSetting
+- **Models:** `backend/models.py` — User, Asset (VIDEO/IMAGE/AUDIO), Folder (nested directories with sharing), Stream (PLAYLIST/BROWSER source types), StreamItem, BrowserSource, UserStreamAssignment, ServerSetting
 - **Auth:** `backend/auth.py` — JWT + bcrypt (pinned `bcrypt<4.1` for passlib compatibility)
 - **Routes:**
   - `backend/routes/auth.py` — login, password change, user CRUD (admin)
-  - `backend/routes/assets.py` — upload (ownership-filtered), rename, storage endpoint, thumbnails (no auth)
+  - `backend/routes/assets.py` — upload (ownership-filtered), rename, storage endpoint, thumbnails (no auth), folder filtering, search/sort
+  - `backend/routes/folders.py` — nested folder CRUD, sharing (admin-only toggle, read-only/read-write), move assets between folders
   - `backend/routes/streams.py` — RBAC: admin creates/configures, assigned users manage playlists. Browser source config, start/stop dispatches to stream_manager or browser_manager
   - `backend/routes/settings.py` — 13 runtime-adjustable server settings, monitoring endpoint with per-stream resource breakdown
 - **Services:**
@@ -50,6 +51,9 @@ Mediacaster is a web-based MPEG-TS multicast playout system. Users upload media 
 | Action | Admin | Regular User |
 |---|---|---|
 | Upload content | ✓ | ✓ (own assets only visible) |
+| Create folders | ✓ | ✓ (own folders) |
+| View folders | ✓ (all) | Own + shared |
+| Set folder sharing | ✓ | ✗ |
 | Create/configure streams | ✓ | ✗ |
 | Modify playlists | ✓ (all) | Only assigned channels |
 | Start/stop streams | ✓ (all) | Only assigned channels |

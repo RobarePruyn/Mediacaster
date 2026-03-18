@@ -32,6 +32,7 @@ from backend.routes import auth as auth_routes
 from backend.routes import assets as asset_routes
 from backend.routes import streams as stream_routes
 from backend.routes import settings as settings_routes
+from backend.routes import folders as folder_routes
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
@@ -160,6 +161,7 @@ app.include_router(auth_routes.router)
 app.include_router(asset_routes.router)
 app.include_router(stream_routes.router)
 app.include_router(settings_routes.router)
+app.include_router(folder_routes.router)
 
 # ── React SPA static file serving ────────────────────────────────────────────
 # In production, the React app is pre-built into frontend/dist/.

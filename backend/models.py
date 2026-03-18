@@ -3,6 +3,7 @@ SQLAlchemy ORM models for the Multicast Streamer application.
 
 Defines the complete data model:
   - **User**: Authentication accounts with RBAC (admin vs regular user)
+  - **Folder**: Nested media directories with optional sharing (read-only/read-write)
   - **Asset**: Uploaded media files (video, image, audio) with transcode status
   - **Stream**: A multicast output channel — either playlist-based or browser-based
   - **StreamItem**: An ordered entry in a playlist stream (links Asset to Stream)
@@ -12,6 +13,9 @@ Defines the complete data model:
 
 Relationships:
   User 1──* Asset (ownership)
+  User 1──* Folder (ownership)
+  Folder 1──* Folder (nesting via parent_id)
+  Folder 1──* Asset (organization, SET NULL on folder delete)
   User *──* Stream (via UserStreamAssignment — RBAC access control)
   Stream 1──* StreamItem *──1 Asset (playlist contents)
   Stream 1──0..1 BrowserSource (browser capture config, only for browser-type streams)
@@ -66,6 +70,12 @@ class StreamSourceType(str, enum.Enum):
     """Determines how a stream generates its video content."""
     PLAYLIST = "playlist"  # Concatenated media assets via ffmpeg
     BROWSER = "browser"    # Virtual Firefox instance captured via x11grab
+
+
+class FolderShareMode(str, enum.Enum):
+    """Access level when a folder is shared with non-owner users."""
+    READ_ONLY = "read_only"    # Can view/use assets but not add/remove/rename
+    READ_WRITE = "read_write"  # Can add/remove/rename assets within the folder
 
 
 # ── Utility functions ─────────────────────────────────────────────────────────
@@ -128,8 +138,38 @@ class User(Base):
 
     # Relationships
     assets = relationship("Asset", back_populates="owner")
+    folders = relationship("Folder", back_populates="owner", cascade="all, delete-orphan")
     assigned_streams = relationship("UserStreamAssignment", back_populates="user",
                                      cascade="all, delete-orphan")
+
+
+class Folder(Base):
+    """
+    A media directory for organizing assets.
+
+    Supports nesting via parent_id (self-referential foreign key). Each folder
+    is owned by the user who created it. Admins can view all folders. Folders
+    can be shared with other users in read-only or read-write mode.
+
+    When a folder is deleted, its assets become unfiled (folder_id = NULL)
+    rather than being deleted.
+    """
+    __tablename__ = "folders"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(256), nullable=False)
+    parent_id = Column(Integer, ForeignKey("folders.id", ondelete="CASCADE"), nullable=True)
+    owner_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    is_shared = Column(Boolean, default=False)
+    share_mode = Column(SAEnum(FolderShareMode), default=FolderShareMode.READ_ONLY)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.datetime.utcnow,
+                        onupdate=datetime.datetime.utcnow)
+
+    # Relationships
+    parent = relationship("Folder", remote_side="Folder.id", backref="children")
+    owner = relationship("User", back_populates="folders")
+    assets = relationship("Asset", back_populates="folder")
 
 
 class Asset(Base):
@@ -160,12 +200,14 @@ class Asset(Base):
     height = Column(Integer, nullable=True)                  # Video height in pixels
     file_size_bytes = Column(Integer, nullable=True)         # Size of transcoded file
     owner_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    folder_id = Column(Integer, ForeignKey("folders.id", ondelete="SET NULL"), nullable=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.datetime.utcnow,
                         onupdate=datetime.datetime.utcnow)
 
     # Relationships
     owner = relationship("User", back_populates="assets")
+    folder = relationship("Folder", back_populates="assets")
     # cascade delete-orphan: if the asset is deleted, remove all playlist entries
     stream_items = relationship("StreamItem", back_populates="asset",
                                 cascade="all, delete-orphan")

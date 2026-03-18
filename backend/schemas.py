@@ -134,6 +134,8 @@ class AssetResponse(BaseModel):
     preview_url: Optional[str] = None
     owner_id: Optional[int] = None
     owner_name: Optional[str] = None
+    folder_id: Optional[int] = None
+    folder_name: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 
@@ -168,6 +170,65 @@ class StorageResponse(BaseModel):
     usable_gb: float             # 80% of total — our operational ceiling
     usable_remaining_gb: float   # How much space remains before hitting usable_gb
     usage_percent: float         # Current usage as a percentage of usable_gb
+
+
+# ── Folders ───────────────────────────────────────────────────────────────────
+
+class FolderCreate(BaseModel):
+    """Request to create a new media folder."""
+    name: str = Field(min_length=1, max_length=256)
+    parent_id: Optional[int] = None
+
+
+class FolderUpdate(BaseModel):
+    """Request to rename a folder or change its parent."""
+    name: Optional[str] = Field(default=None, min_length=1, max_length=256)
+    parent_id: Optional[int] = None
+
+
+class FolderShareUpdate(BaseModel):
+    """Admin request to set folder sharing (toggle + mode)."""
+    is_shared: bool
+    share_mode: str = Field(default="read_only")  # "read_only" or "read_write"
+
+
+class FolderResponse(BaseModel):
+    """Representation of a media folder."""
+    id: int
+    name: str
+    parent_id: Optional[int] = None
+    owner_id: int
+    owner_name: Optional[str] = None
+    is_shared: bool = False
+    share_mode: str = "read_only"
+    asset_count: int = 0
+    child_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class FolderTreeResponse(BaseModel):
+    """Folder with nested children for tree rendering."""
+    id: int
+    name: str
+    parent_id: Optional[int] = None
+    owner_id: int
+    is_shared: bool = False
+    share_mode: str = "read_only"
+    asset_count: int = 0
+    children: List["FolderTreeResponse"] = []
+
+    class Config:
+        from_attributes = True
+
+
+class MoveAssetsRequest(BaseModel):
+    """Request to move assets into a folder (or unfiled with folder_id=null)."""
+    asset_ids: List[int]
+    folder_id: Optional[int] = None
 
 
 # ── Streams ───────────────────────────────────────────────────────────────────

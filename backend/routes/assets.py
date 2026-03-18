@@ -25,11 +25,12 @@ import uuid
 import logging
 from pathlib import Path
 import psutil
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, BackgroundTasks
+from typing import Optional
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, BackgroundTasks, Query
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from backend.database import get_db, SessionLocal
-from backend.models import Asset, AssetStatus, User
+from backend.models import Asset, AssetStatus, User, Folder, FolderShareMode
 from backend.schemas import AssetResponse, AssetListResponse, AssetRename, StorageResponse
 from backend.auth import get_current_user
 from backend.config import UPLOAD_DIR, MEDIA_DIR
@@ -62,6 +63,8 @@ def _to_response(asset: Asset) -> AssetResponse:
         preview_url=f"/api/assets/{asset.id}/preview" if asset.status == AssetStatus.READY else None,
         owner_id=asset.owner_id,
         owner_name=asset.owner.username if asset.owner else None,
+        folder_id=asset.folder_id,
+        folder_name=asset.folder.name if asset.folder else None,
         created_at=asset.created_at, updated_at=asset.updated_at)
 
 
@@ -127,15 +130,67 @@ async def upload_asset(background_tasks: BackgroundTasks,
 
 @router.get("", response_model=AssetListResponse)
 def list_assets(db: Session = Depends(get_db),
-                current_user: User = Depends(get_current_user)):
-    """List assets — admins see all, regular users see only their own."""
+                current_user: User = Depends(get_current_user),
+                folder_id: Optional[int] = Query(None, description="Filter by folder ID. Use 0 for unfiled assets."),
+                search: Optional[str] = Query(None, description="Search by display name"),
+                sort: Optional[str] = Query(None, description="Sort field: name, date, size, type"),
+                sort_dir: Optional[str] = Query("asc", description="Sort direction: asc or desc")):
+    """List assets with optional folder, search, and sort filters.
+
+    Admins see all assets. Regular users see their own assets plus assets in
+    shared folders. Use folder_id=0 for unfiled assets, folder_id=N for a
+    specific folder, or omit for all assets.
+    """
+    query = db.query(Asset)
+
     if current_user.is_admin:
-        assets = db.query(Asset).order_by(Asset.created_at.desc()).all()
+        # Admins see everything, optionally filtered by folder
+        if folder_id is not None:
+            if folder_id == 0:
+                query = query.filter(Asset.folder_id == None)
+            else:
+                query = query.filter(Asset.folder_id == folder_id)
     else:
-        # Ownership filter: regular users only see assets they uploaded
-        assets = db.query(Asset).filter(
-            Asset.owner_id == current_user.id
-        ).order_by(Asset.created_at.desc()).all()
+        # Regular users: own assets + assets in shared folders
+        if folder_id is not None and folder_id > 0:
+            # Viewing a specific folder — check if they can see it
+            folder = db.query(Folder).filter(Folder.id == folder_id).first()
+            if folder and (folder.owner_id == current_user.id or folder.is_shared):
+                query = query.filter(Asset.folder_id == folder_id)
+            else:
+                # No access or doesn't exist — return empty
+                return AssetListResponse(assets=[], total_count=0)
+        elif folder_id == 0:
+            # Unfiled: only user's own unfiled assets
+            query = query.filter(Asset.owner_id == current_user.id, Asset.folder_id == None)
+        else:
+            # All visible assets: own + in shared folders
+            shared_folder_ids = [f.id for f in db.query(Folder.id).filter(
+                Folder.is_shared == True
+            ).all()]
+            query = query.filter(
+                (Asset.owner_id == current_user.id) |
+                (Asset.folder_id.in_(shared_folder_ids) if shared_folder_ids else False)
+            )
+
+    # Search by display name (case-insensitive partial match)
+    if search:
+        query = query.filter(Asset.display_name.ilike(f"%{search}%"))
+
+    # Sort
+    sort_column = {
+        "name": Asset.display_name,
+        "date": Asset.created_at,
+        "size": Asset.file_size_bytes,
+        "type": Asset.asset_type,
+    }.get(sort, Asset.created_at)
+
+    if sort_dir == "desc":
+        query = query.order_by(sort_column.desc())
+    else:
+        query = query.order_by(sort_column.asc())
+
+    assets = query.all()
     return AssetListResponse(assets=[_to_response(a) for a in assets],
                              total_count=len(assets))
 
