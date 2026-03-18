@@ -232,6 +232,26 @@ chmod 775 "${APP_DIR}"/{media,uploads,thumbnails,db,playlists}
 log_step "Step 8/9: Configuring services"
 
 cp "${SCRIPT_DIR}/systemd/multicast-streamer.service" /etc/systemd/system/
+
+# Generate a persistent JWT secret so sessions survive service restarts.
+# Stored in a systemd override file (not in the main unit, which gets
+# overwritten on every deploy). Only generated once — subsequent deploys
+# preserve the existing key.
+OVERRIDE_DIR="/etc/systemd/system/multicast-streamer.service.d"
+OVERRIDE_FILE="${OVERRIDE_DIR}/secret.conf"
+if [[ ! -f "${OVERRIDE_FILE}" ]]; then
+    JWT_SECRET=$(python3 -c "import secrets; print(secrets.token_urlsafe(64))")
+    mkdir -p "${OVERRIDE_DIR}"
+    cat > "${OVERRIDE_FILE}" << SECRETEOF
+[Service]
+Environment="MCS_SECRET_KEY=${JWT_SECRET}"
+SECRETEOF
+    chmod 600 "${OVERRIDE_FILE}"
+    log_info "Generated JWT secret in ${OVERRIDE_FILE}"
+else
+    log_info "JWT secret already exists — preserving"
+fi
+
 systemctl daemon-reload
 systemctl enable multicast-streamer
 
