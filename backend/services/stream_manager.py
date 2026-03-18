@@ -24,6 +24,7 @@ from typing import Dict, Optional
 from sqlalchemy.orm import Session
 from backend import config
 from backend.models import Stream, StreamStatus, StreamSourceType, PlaybackMode, AssetStatus
+from backend.services.browser_manager import _detect_host_multicast_ip
 
 logger = logging.getLogger("stream_manager")
 
@@ -117,6 +118,11 @@ class StreamManager:
         """
         url = (f"udp://{stream.multicast_address}:{stream.multicast_port}"
                f"?pkt_size=1316&ttl={config.MULTICAST_TTL}")
+        # Bind to the host's primary NIC so multicast packets go out the right
+        # interface instead of potentially hitting loopback
+        host_ip = _detect_host_multicast_ip()
+        if host_ip:
+            url += f"&localaddr={host_ip}"
         cmd = [config.FFMPEG_PATH, "-y", "-re"]
         if stream.playback_mode == PlaybackMode.LOOP:
             # -stream_loop -1 tells ffmpeg to loop the concat input infinitely
