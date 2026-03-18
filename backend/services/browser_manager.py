@@ -501,9 +501,23 @@ class BrowserManager:
         }
 
     async def stop_all(self):
-        """Stop all active browser containers. Called during application shutdown."""
+        """
+        Kill all browser containers during application shutdown.
+
+        Unlike stop_browser(), this intentionally does NOT update DB status.
+        Streams stay marked as RUNNING so restore_sessions() can restart them
+        when the service comes back up. Only the containers and local state
+        are cleaned up.
+        """
         for sid in list(self._active.keys()):
-            await self.stop_browser(sid)
+            managed = self._active[sid]
+            managed.should_stop = True
+            container_name = managed.container_name
+            await self._run_cmd(["sudo", "podman", "stop", "-t", "10", container_name])
+            await self._run_cmd(["sudo", "podman", "rm", "-f", container_name])
+            self._release_display(managed.display_number)
+            logger.info("Browser container %s killed (shutdown)", container_name)
+        self._active.clear()
 
     async def restore_sessions(self):
         """

@@ -351,9 +351,34 @@ class StreamManager:
                     db.close()
 
     async def stop_all(self) -> None:
-        """Stop all active streams. Called during application shutdown."""
+        """
+        Kill all active ffmpeg processes during application shutdown.
+
+        Unlike stop_stream(), this intentionally does NOT update DB status.
+        Streams stay marked as RUNNING so restore_sessions() can restart them
+        when the service comes back up. Only the processes and local state
+        are cleaned up.
+        """
         for sid in list(self._active.keys()):
-            await self.stop_stream(sid)
+            managed = self._active[sid]
+            managed.should_stop = True
+            if managed.restart_task and not managed.restart_task.done():
+                managed.restart_task.cancel()
+            try:
+                managed.process.send_signal(signal.SIGTERM)
+                try:
+                    await asyncio.wait_for(managed.process.wait(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    managed.process.kill()
+                    await managed.process.wait()
+            except ProcessLookupError:
+                pass
+            try:
+                os.remove(managed.concat_file_path)
+            except OSError:
+                pass
+            logger.info("Stream %d process killed (shutdown)", sid)
+        self._active.clear()
 
     def get_status(self, stream_id: int) -> dict:
         """
