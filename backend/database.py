@@ -1,55 +1,31 @@
 """
-Database engine and session factory for SQLite.
+Database engine and session factory for PostgreSQL.
 
 This module creates the SQLAlchemy engine, session factory, and declarative
-base that all models inherit from. SQLite is used as the database backend
-for simplicity — the entire database is a single file on disk.
+base that all models inherit from. PostgreSQL is the production database.
 
 Key components:
-  - ``engine``: The SQLAlchemy Engine connected to the SQLite file.
+  - ``engine``: The SQLAlchemy Engine connected to PostgreSQL.
   - ``SessionLocal``: A session factory for creating per-request DB sessions.
   - ``Base``: The declarative base class that all ORM models inherit from.
   - ``get_db()``: A FastAPI dependency that provides a session per request
     and ensures it is closed after the response is sent.
-  - ``init_db()``: Creates all tables defined by Base subclasses.
 """
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
-from backend.config import DATABASE_PATH
-
-# SQLite connection URL — three slashes for absolute path (sqlite:///path)
-DATABASE_URL = f"sqlite:///{DATABASE_PATH}"
+from backend.config import DATABASE_URL
 
 engine = create_engine(
     DATABASE_URL,
-    # SQLite requires this for multi-threaded access (FastAPI is async).
-    # Without it, SQLite raises "ProgrammingError: SQLite objects created
-    # in a thread can only be used in that same thread."
-    connect_args={"check_same_thread": False},
-    # Set echo=True to log all SQL statements (useful for debugging)
-    echo=False,
+    # PostgreSQL connection pool: 5 persistent connections, up to 10 overflow
+    # for burst traffic. Adequate for a single-worker uvicorn deployment.
+    pool_size=5,
+    max_overflow=10,
+    # Recycle connections every 30 minutes to avoid stale connections
+    # after PostgreSQL restarts or idle timeouts.
+    pool_recycle=1800,
 )
-
-
-@event.listens_for(engine, "connect")
-def _set_sqlite_pragmas(dbapi_connection, connection_record):
-    """
-    Configure SQLite pragmas on every new connection.
-
-    WAL (Write-Ahead Logging) mode allows concurrent readers while a write
-    is in progress — critical for FastAPI where API reads and background
-    transcodes can hit the DB simultaneously. Without WAL, readers block
-    on writes and vice versa.
-
-    busy_timeout tells SQLite to wait up to 5 seconds for a lock instead of
-    immediately raising "database is locked". This handles brief contention
-    during transcode progress updates.
-    """
-    cursor = dbapi_connection.cursor()
-    cursor.execute("PRAGMA journal_mode=WAL")
-    cursor.execute("PRAGMA busy_timeout=5000")
-    cursor.close()
 
 # Session factory — autocommit=False means we control transactions explicitly.
 # autoflush=False prevents automatic flushes before queries, giving us more
@@ -57,7 +33,7 @@ def _set_sqlite_pragmas(dbapi_connection, connection_record):
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 # All ORM models inherit from this base class, which provides the
-# metadata registry used by create_all() and migration tooling.
+# metadata registry used by Alembic and create_all().
 Base = declarative_base()
 
 
@@ -75,22 +51,10 @@ def get_db():
     even if an exception occurs.
 
     Yields:
-        Session: An active SQLAlchemy session bound to the SQLite engine.
+        Session: An active SQLAlchemy session bound to the PostgreSQL engine.
     """
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
-
-
-def init_db():
-    """
-    Create all tables that don't already exist in the database.
-
-    Called once during application startup. SQLAlchemy inspects the
-    database and only creates tables whose names are not yet present —
-    it does NOT alter existing tables (that's handled by _run_migrations
-    in main.py).
-    """
-    Base.metadata.create_all(bind=engine)

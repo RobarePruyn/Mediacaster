@@ -30,8 +30,13 @@ BASE_DIR = Path(os.getenv("MCS_BASE_DIR", "/opt/multicast-streamer"))
 MEDIA_DIR = BASE_DIR / "media"            # Transcoded media files ready for playout
 UPLOAD_DIR = BASE_DIR / "uploads"          # Raw uploaded files (pre-transcode)
 THUMBNAIL_DIR = BASE_DIR / "thumbnails"    # Auto-generated video/image thumbnails
-DATABASE_PATH = BASE_DIR / "db" / "streamer.db"  # SQLite database file
 CONCAT_DIR = BASE_DIR / "playlists"        # ffmpeg concat-demuxer playlist text files
+
+# PostgreSQL connection URL. Override with MCS_DATABASE_URL for custom host/port/credentials.
+DATABASE_URL = os.getenv(
+    "MCS_DATABASE_URL",
+    "postgresql://mcs:mcs@localhost:5432/mediacaster"
+)
 
 # ── Transcode profile ────────────────────────────────────────────────────────
 # All uploaded media is normalized to this profile before playout. This ensures
@@ -104,5 +109,5 @@ FFPROBE_PATH = os.getenv("MCS_FFPROBE_PATH", "/usr/bin/ffprobe")
 # Create all required data directories at import time so the rest of the
 # application can assume they exist. parents=True handles nested paths,
 # exist_ok=True makes it idempotent.
-for _dir in [MEDIA_DIR, UPLOAD_DIR, THUMBNAIL_DIR, DATABASE_PATH.parent, CONCAT_DIR]:
+for _dir in [MEDIA_DIR, UPLOAD_DIR, THUMBNAIL_DIR, CONCAT_DIR]:
     _dir.mkdir(parents=True, exist_ok=True)

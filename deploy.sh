@@ -85,10 +85,11 @@ dnf install -y \
 # ---------------------------------------------------------------------------
 log_step "Step 2/9: Installing system packages"
 
-log_info "Installing core packages (ffmpeg, Python, nginx)..."
+log_info "Installing core packages (ffmpeg, Python, PostgreSQL, nginx)..."
 dnf install -y \
     ffmpeg ffmpeg-devel \
     python3 python3-pip python3-devel \
+    postgresql-server postgresql \
     nginx gcc make git curl
 
 # Podman runs browser source containers (containerized Firefox + capture stack).
@@ -108,6 +109,42 @@ if ! command -v ffmpeg &>/dev/null; then
     exit 1
 fi
 log_info "ffmpeg: $(ffmpeg -version | head -1)"
+
+# Initialize PostgreSQL if not already done. postgresql-setup creates the
+# data directory and default configuration.
+if [[ ! -f /var/lib/pgsql/data/PG_VERSION ]]; then
+    postgresql-setup --initdb
+    log_info "PostgreSQL data directory initialized"
+fi
+
+# Start and enable PostgreSQL
+systemctl enable postgresql
+systemctl start postgresql
+
+# Create the mediacaster database and mcs user if they don't exist.
+# sudo -u postgres runs commands as the PostgreSQL superuser.
+if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='mcs'" | grep -q 1; then
+    sudo -u postgres psql -c "CREATE USER mcs WITH PASSWORD 'mcs';"
+    log_info "Created PostgreSQL user: mcs"
+fi
+if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='mediacaster'" | grep -q 1; then
+    sudo -u postgres psql -c "CREATE DATABASE mediacaster OWNER mcs;"
+    log_info "Created PostgreSQL database: mediacaster"
+fi
+
+# Configure pg_hba.conf for local password authentication.
+# By default, PostgreSQL uses 'ident' auth for local connections which
+# requires OS username == DB username. We need 'scram-sha-256' (password auth)
+# since the mcs service user connects with a password.
+PG_HBA="/var/lib/pgsql/data/pg_hba.conf"
+if ! grep -q "mcs.*mediacaster.*scram-sha-256" "${PG_HBA}" 2>/dev/null; then
+    # Insert our rule before the default local rules so it takes priority
+    sed -i '/^# IPv4 local connections/a host    mediacaster     mcs             127.0.0.1/32            scram-sha-256' "${PG_HBA}"
+    # Also allow local socket connections with password auth
+    sed -i '/^# "local" is for Unix domain/a local   mediacaster     mcs                                     scram-sha-256' "${PG_HBA}"
+    systemctl restart postgresql
+    log_info "Configured PostgreSQL authentication for mcs user"
+fi
 
 # ---------------------------------------------------------------------------
 # Step 3: Node.js (for building the React frontend)
@@ -157,7 +194,7 @@ loginctl enable-linger "${APP_USER}" 2>/dev/null || true
 
 # Create the data directories — media/uploads/thumbnails hold user content,
 # db holds the SQLite database, playlists holds generated ffmpeg concat files
-mkdir -p "${APP_DIR}"/{media,uploads,thumbnails,db,playlists}
+mkdir -p "${APP_DIR}"/{media,uploads,thumbnails,playlists}
 
 # ---------------------------------------------------------------------------
 # Step 5: Deploy application files
@@ -224,7 +261,7 @@ log_step "Step 7/9: Setting ownership and permissions"
 chown -R "${APP_USER}:${APP_GROUP}" "${APP_DIR}"
 chmod -R 755 "${APP_DIR}"
 # Data directories need group-write so the app can create files
-chmod 775 "${APP_DIR}"/{media,uploads,thumbnails,db,playlists}
+chmod 775 "${APP_DIR}"/{media,uploads,thumbnails,playlists}
 
 # ---------------------------------------------------------------------------
 # Step 8: Systemd + nginx
@@ -238,18 +275,24 @@ cp "${SCRIPT_DIR}/systemd/multicast-streamer.service" /etc/systemd/system/
 # overwritten on every deploy). Only generated once — subsequent deploys
 # preserve the existing key.
 OVERRIDE_DIR="/etc/systemd/system/multicast-streamer.service.d"
-OVERRIDE_FILE="${OVERRIDE_DIR}/secret.conf"
+OVERRIDE_FILE="${OVERRIDE_DIR}/env.conf"
 if [[ ! -f "${OVERRIDE_FILE}" ]]; then
     JWT_SECRET=$(python3 -c "import secrets; print(secrets.token_urlsafe(64))")
     mkdir -p "${OVERRIDE_DIR}"
     cat > "${OVERRIDE_FILE}" << SECRETEOF
 [Service]
 Environment="MCS_SECRET_KEY=${JWT_SECRET}"
+Environment="MCS_DATABASE_URL=postgresql://mcs:mcs@localhost:5432/mediacaster"
 SECRETEOF
     chmod 600 "${OVERRIDE_FILE}"
-    log_info "Generated JWT secret in ${OVERRIDE_FILE}"
+    log_info "Generated environment overrides in ${OVERRIDE_FILE}"
 else
-    log_info "JWT secret already exists — preserving"
+    # Ensure DATABASE_URL is present in existing override file
+    if ! grep -q "MCS_DATABASE_URL" "${OVERRIDE_FILE}" 2>/dev/null; then
+        echo 'Environment="MCS_DATABASE_URL=postgresql://mcs:mcs@localhost:5432/mediacaster"' >> "${OVERRIDE_FILE}"
+        log_info "Added DATABASE_URL to existing environment overrides"
+    fi
+    log_info "Environment overrides already exist — preserving"
 fi
 
 systemctl daemon-reload

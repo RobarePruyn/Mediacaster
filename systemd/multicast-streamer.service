@@ -8,8 +8,10 @@
 
 [Unit]
 Description=Multicast Streamer — MPEG-TS Multicast Playout System
-# Wait for networking — multicast output and container pulls need it
-After=network.target
+# Wait for networking and PostgreSQL — multicast output needs network,
+# and the app needs the database to be ready before starting
+After=network.target postgresql.service
+Requires=postgresql.service
 
 [Service]
 Type=simple

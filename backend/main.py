@@ -3,7 +3,7 @@ Multicast Streamer — FastAPI entry point.
 
 This is the top-level module that bootstraps the entire application:
   - Registers all API route modules (auth, assets, streams, settings)
-  - Runs SQLite schema migrations on startup
+  - Runs Alembic migrations on startup (PostgreSQL schema management)
   - Seeds a default admin user and server settings
   - Initializes the StreamManager (ffmpeg playlist playout) and
     BrowserManager (Podman-based browser capture) singletons
@@ -20,10 +20,11 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from sqlalchemy import text
+from alembic.config import Config as AlembicConfig
+from alembic import command as alembic_command
 from backend.config import CORS_ORIGINS, DEFAULT_ADMIN_USERNAME, DEFAULT_ADMIN_PASSWORD
-from backend.database import init_db, SessionLocal
-from backend.models import User, Asset, AssetStatus, Stream, StreamStatus, StreamSourceType
+from backend.database import SessionLocal
+from backend.models import User, Asset, AssetStatus
 from backend.auth import hash_password
 from backend.services.stream_manager import StreamManager
 from backend.services.browser_manager import BrowserManager
@@ -37,61 +38,21 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger("main")
 
 
-def _run_migrations(db):
+def _run_alembic_migrations():
     """
-    Lightweight SQLite schema migrations for upgrades.
+    Run Alembic migrations to bring the database schema up to date.
 
-    SQLite doesn't support full ALTER TABLE, so we use a simple pattern:
-    try to SELECT the column — if it fails, ADD it. This avoids needing
-    a dedicated migration framework (Alembic) for this small schema.
-
-    Args:
-        db: An active SQLAlchemy Session used to execute raw SQL statements.
+    Uses the alembic.ini config relative to the project root. This is called
+    once during application startup so the schema is always current without
+    requiring a separate migration step during deployment.
     """
-    # Each tuple: (table_name, column_name, column_definition)
-    # These represent columns added after the initial schema was deployed.
-    migrations = [
-        ("users", "must_change_password", "BOOLEAN DEFAULT 1"),
-        ("assets", "display_name", "VARCHAR(512)"),
-        ("assets", "transcode_progress", "FLOAT DEFAULT 0.0"),
-        ("assets", "source_duration_seconds", "FLOAT"),
-        ("assets", "owner_id", "INTEGER"),
-        ("streams", "source_type", "VARCHAR(32) DEFAULT 'playlist'"),
-    ]
-    for table, column, col_type in migrations:
-        try:
-            # Probe whether the column exists by selecting from it
-            db.execute(text(f"SELECT {column} FROM {table} LIMIT 1"))
-        except Exception:
-            # Column doesn't exist yet — add it to the table
-            logger.info("Migration: adding %s.%s", table, column)
-            db.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"))
-            db.commit()
-
-    # Backfill display_name for assets created before that column existed.
-    # display_name defaults to the original uploaded filename.
-    try:
-        db.execute(text(
-            "UPDATE assets SET display_name = original_filename "
-            "WHERE display_name IS NULL"
-        ))
-        db.commit()
-    except Exception as exc:
-        # Non-critical: display_name is cosmetic. Log and continue.
-        logger.warning("display_name backfill skipped: %s", exc)
-
-    # Assign unowned assets to the first admin user so they remain
-    # accessible in the UI after the owner_id column was introduced.
-    try:
-        db.execute(text(
-            "UPDATE assets SET owner_id = ("
-            "  SELECT id FROM users WHERE is_admin = 1 LIMIT 1"
-            ") WHERE owner_id IS NULL"
-        ))
-        db.commit()
-    except Exception as exc:
-        # Non-critical: assets will just appear unowned. Log and continue.
-        logger.warning("owner_id backfill skipped: %s", exc)
+    project_root = Path(__file__).parent.parent
+    alembic_cfg = AlembicConfig(str(project_root / "alembic.ini"))
+    # Override the script_location to use an absolute path so it works
+    # regardless of the working directory
+    alembic_cfg.set_main_option("script_location", str(project_root / "alembic"))
+    alembic_command.upgrade(alembic_cfg, "head")
+    logger.info("Alembic migrations applied")
 
 
 @asynccontextmanager
@@ -100,30 +61,28 @@ async def lifespan(app: FastAPI):
     FastAPI lifespan context manager — runs once at startup and shutdown.
 
     Startup sequence:
-      1. Create database tables (if missing)
-      2. Run column-level migrations
-      3. Seed default admin user (if not present)
-      4. Seed default server settings
-      5. Apply persisted settings to runtime config module
+      1. Run Alembic migrations (creates/updates PostgreSQL schema)
+      2. Seed default admin user (if not present)
+      3. Seed default server settings
+      4. Apply persisted settings to runtime config module
+      5. Reset stale PROCESSING assets from prior crashes
       6. Initialize StreamManager and BrowserManager
-      7. Restore any browser sources that were running before restart
+      7. Restore streams that were running before restart
 
     Shutdown sequence:
-      1. Stop all active playlist streams (kills ffmpeg processes)
-      2. Stop all browser source containers (podman rm)
+      1. Kill all active playlist stream ffmpeg processes
+      2. Kill all browser source containers
 
     Args:
         app: The FastAPI application instance. Managers are stored on app.state
              so route handlers can access them via request.app.state.
     """
     # --- Startup ---
-    logger.info("Initializing database...")
-    init_db()
+    logger.info("Running database migrations...")
+    _run_alembic_migrations()
 
     db = SessionLocal()
     try:
-        _run_migrations(db)
-
         # Create default admin user if the database is fresh or the user was deleted
         if not db.query(User).filter(User.username == DEFAULT_ADMIN_USERNAME).first():
             db.add(User(username=DEFAULT_ADMIN_USERNAME,
@@ -189,7 +148,7 @@ async def lifespan(app: FastAPI):
 # ── FastAPI application instance ──────────────────────────────────────────────
 app = FastAPI(title="Multicast Streamer",
               description="Media library + MPEG-TS multicast playout",
-              version="1.1.0", lifespan=lifespan)
+              version="2.0.0", lifespan=lifespan)
 
 # Allow cross-origin requests from the React dev server (localhost:3000)
 # and any other origins specified via MCS_CORS_ORIGINS env var.
@@ -204,7 +163,7 @@ app.include_router(settings_routes.router)
 
 # ── React SPA static file serving ────────────────────────────────────────────
 # In production, the React app is pre-built into frontend/dist/.
-# We serve /static/* directly and route everything else to index.html
+# We serve /assets/* directly and route everything else to index.html
 # so that React Router handles client-side navigation.
 FRONTEND_DIST = Path(__file__).parent.parent / "frontend" / "dist"
 if FRONTEND_DIST.exists():

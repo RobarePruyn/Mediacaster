@@ -1,6 +1,8 @@
 fastapi==0.115.0
 uvicorn[standard]==0.30.0
 sqlalchemy==2.0.35
+alembic==1.14.1
+psycopg2-binary>=2.9
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
 bcrypt<4.1                       # passlib 1.7.4 incompatible with bcrypt 4.1+

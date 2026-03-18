@@ -8,7 +8,7 @@ Mediacaster is a web-based MPEG-TS multicast playout system. Users upload media 
 ### Backend (Python/FastAPI)
 - **Entry:** `backend/main.py` — FastAPI app, lifespan (startup/shutdown), DB migrations, default admin seeding
 - **Config:** `backend/config.py` — centralized config with `MCS_*` env var overrides
-- **Database:** `backend/database.py` — SQLAlchemy engine, SQLite at `db/streamer.db`
+- **Database:** `backend/database.py` — SQLAlchemy engine, PostgreSQL (via psycopg2)
 - **Models:** `backend/models.py` — User, Asset (VIDEO/IMAGE/AUDIO), Stream (PLAYLIST/BROWSER source types), StreamItem, BrowserSource, UserStreamAssignment, ServerSetting
 - **Auth:** `backend/auth.py` — JWT + bcrypt (pinned `bcrypt<4.1` for passlib compatibility)
 - **Routes:**
@@ -44,7 +44,7 @@ Mediacaster is a web-based MPEG-TS multicast playout system. Users upload media 
 - **deploy.sh** — full AlmaLinux deployment (repos, packages, podman, venv, frontend build, container image build, systemd, nginx, firewall, SELinux, multicast routing, sudoers)
 - **nginx/multicast-streamer.conf** — reverse proxy for API + static frontend. noVNC iframe connects directly to the websockify port (6080-6180 range opened in firewall).
 - **systemd/multicast-streamer.service** — runs as `mcs` user, `ExecStartPre=+` for /run/user creation, relaxed sandboxing for Podman
-- **requirements.txt** — fastapi, uvicorn, sqlalchemy, python-jose, passlib, bcrypt<4.1, python-multipart, aiofiles, psutil
+- **requirements.txt** — fastapi, uvicorn, sqlalchemy, alembic, psycopg2-binary, python-jose, passlib, bcrypt<4.1, python-multipart, aiofiles, psutil
 
 ## RBAC Model
 | Action | Admin | Regular User |
@@ -93,7 +93,7 @@ Mediacaster is a web-based MPEG-TS multicast playout system. Users upload media 
 ## Key Dependencies / Gotchas
 - `bcrypt` must be pinned `<4.1` — passlib 1.7.4 crashes with bcrypt 4.1+
 - Thumbnails/previews served without auth (img tags can't send JWT headers)
-- SQLite migrations are manual column-adds in `main.py._run_migrations()`
+- Schema migrations handled by Alembic (`alembic/` directory, `alembic.ini`)
 - Container user is `browseruser` (not root) — `podman exec` commands need to account for this
 - `deploy.sh` runs as root, builds container image as root, service runs as `mcs` with `sudo podman`
 - The `mcs` system user has `/sbin/nologin` shell — use `sudo -u mcs` for git operations
