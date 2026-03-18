@@ -6,8 +6,9 @@ system-wide metrics and per-PID resource tracking of ffmpeg playout processes an
 browser source containers.
 
 The monitoring endpoint in routes/settings.py calls these functions on each request,
-so they're designed to be lightweight and non-blocking (CPU sampling uses a short 0.5s
-interval, network rates are calculated from deltas between successive calls).
+so they're designed to be lightweight and non-blocking. CPU sampling uses interval=None
+(returns cached value since last call) and is primed once at module load. Network rates
+are calculated from deltas between successive calls.
 
 Key design decisions:
   - Network throughput is calculated as a delta between calls rather than using psutil's
@@ -24,6 +25,12 @@ import psutil
 
 logger = logging.getLogger("monitor")
 
+# Prime the CPU percentage counter at import time. psutil.cpu_percent(interval=None)
+# returns 0.0 on the very first call because there's no prior sample to diff against.
+# By calling it once here, subsequent calls in get_system_stats() return real values
+# without blocking the request thread for 0.5 seconds.
+psutil.cpu_percent(interval=None)
+
 # Module-level cache for network rate calculation.
 # We need two consecutive samples to compute bytes/second, so we store the
 # previous sample's counters and timestamp here between calls.
@@ -35,8 +42,9 @@ def get_system_stats() -> dict:
     """
     Collect system-wide resource utilization metrics.
 
-    CPU is sampled with a 0.5s blocking interval (psutil needs a time window to
-    measure CPU usage — interval=0 would return 0.0 on the first call).
+    CPU is sampled with interval=None (non-blocking, returns the delta since the
+    last call). The counter is primed at module load time so the first API call
+    gets a real value instead of 0.0.
 
     Network throughput is computed as the delta in bytes since the last call,
     converted to megabits per second. The first call after startup will return 0.0
@@ -54,8 +62,8 @@ def get_system_stats() -> dict:
     """
     global _last_net_sample, _last_net_time
 
-    # CPU — 0.5s blocking sample gives a meaningful reading without too much latency
-    cpu_percent = psutil.cpu_percent(interval=0.5)
+    # CPU — non-blocking call returns delta since last invocation (primed at import)
+    cpu_percent = psutil.cpu_percent(interval=None)
     cpu_count = psutil.cpu_count()
 
     # Memory — straightforward snapshot from the OS

@@ -183,12 +183,12 @@ cp -r "${SCRIPT_DIR}/container" "${APP_DIR}/"
 log_step "Step 6/9: Building React frontend and browser source container"
 
 cd "${APP_DIR}/frontend"
-# --include=dev ensures devDependencies (react-scripts, build tooling) are
+# --include=dev ensures devDependencies (Vite, build tooling) are
 # installed — they're needed for `npm run build` but not at runtime
 npm install --include=dev
 npm run build
 # Remove node_modules after build — they're not needed at runtime
-# (the built static files in build/ are served by nginx)
+# (the built static files in dist/ are served by nginx)
 rm -rf node_modules
 log_info "Frontend build complete"
 
@@ -238,6 +238,17 @@ systemctl enable multicast-streamer
 # Remove the default nginx welcome page config — it would conflict with
 # our server block (both listen on port 80 with server_name _)
 rm -f /etc/nginx/conf.d/default.conf
+
+# Comment out the embedded default server block in nginx.conf (typically
+# lines 37-57) that also shadows our config. The sed matches the block
+# start ("server {" at indent level) through its closing "}" and prepends
+# "#MCS#" to each line, making it idempotent (already-commented lines
+# won't be double-commented).
+if grep -q '^\s*server\s*{' /etc/nginx/nginx.conf 2>/dev/null; then
+    sed -i '/^\s*server\s*{/,/^\s*}/{ /^#MCS#/! s/^/#MCS# / }' /etc/nginx/nginx.conf
+    log_info "Commented out default server block in /etc/nginx/nginx.conf"
+fi
+
 cp "${SCRIPT_DIR}/nginx/multicast-streamer.conf" /etc/nginx/conf.d/
 nginx -t
 systemctl enable nginx
@@ -294,17 +305,28 @@ fi
 # which interface to send multicast packets out on. Without this, multicast
 # traffic may go to the loopback interface or be dropped entirely, depending
 # on the routing table. We persist it to survive reboots.
+# Add multicast route for the current session
 if ! ip route show | grep -q "239.0.0.0/8"; then
-    # Determine the primary network interface by checking which interface
-    # the default route uses (the one that reaches the internet)
     PRIMARY_IFACE=$(ip route get 1.1.1.1 | awk '{print $5; exit}')
     if [[ -n "${PRIMARY_IFACE}" ]]; then
         ip route add 239.0.0.0/8 dev "${PRIMARY_IFACE}" 2>/dev/null || true
-        # Persist the route across reboots via network-scripts
-        mkdir -p /etc/sysconfig/network-scripts
-        echo "239.0.0.0/8 dev ${PRIMARY_IFACE}" > /etc/sysconfig/network-scripts/route-multicast
         log_info "Multicast route added via ${PRIMARY_IFACE}"
     fi
+fi
+
+# Persist the multicast route across reboots via a NetworkManager dispatcher
+# script. This is more reliable than /etc/sysconfig/network-scripts/ which
+# is deprecated on AL9+ and unreliable with NetworkManager.
+DISPATCHER="/etc/NetworkManager/dispatcher.d/99-multicast-route"
+if [[ ! -f "${DISPATCHER}" ]]; then
+    cat > "${DISPATCHER}" << 'DISPATCH'
+#!/bin/bash
+if [ "$2" = "up" ]; then
+    ip route add 239.0.0.0/8 dev "$1" 2>/dev/null || true
+fi
+DISPATCH
+    chmod 755 "${DISPATCHER}"
+    log_info "Installed NetworkManager dispatcher for multicast route persistence"
 fi
 
 # ---------------------------------------------------------------------------

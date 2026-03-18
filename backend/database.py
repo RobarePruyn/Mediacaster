@@ -14,7 +14,7 @@ Key components:
   - ``init_db()``: Creates all tables defined by Base subclasses.
 """
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker, declarative_base
 from backend.config import DATABASE_PATH
 
@@ -30,6 +30,26 @@ engine = create_engine(
     # Set echo=True to log all SQL statements (useful for debugging)
     echo=False,
 )
+
+
+@event.listens_for(engine, "connect")
+def _set_sqlite_pragmas(dbapi_connection, connection_record):
+    """
+    Configure SQLite pragmas on every new connection.
+
+    WAL (Write-Ahead Logging) mode allows concurrent readers while a write
+    is in progress — critical for FastAPI where API reads and background
+    transcodes can hit the DB simultaneously. Without WAL, readers block
+    on writes and vice versa.
+
+    busy_timeout tells SQLite to wait up to 5 seconds for a lock instead of
+    immediately raising "database is locked". This handles brief contention
+    during transcode progress updates.
+    """
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA busy_timeout=5000")
+    cursor.close()
 
 # Session factory — autocommit=False means we control transactions explicitly.
 # autoflush=False prevents automatic flushes before queries, giving us more

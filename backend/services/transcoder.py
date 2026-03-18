@@ -24,6 +24,12 @@ from backend.models import Asset, AssetStatus, AssetType
 
 logger = logging.getLogger("transcoder")
 
+# Limit concurrent transcodes to avoid saturating CPU/memory when multiple
+# users upload simultaneously. Queued transcodes wait here until a slot opens.
+# 2 concurrent is a reasonable default — each ffmpeg instance uses 2-4 CPU cores
+# with the "medium" preset, so 2 concurrent transcodes already saturate an 8-core server.
+_transcode_semaphore = asyncio.Semaphore(2)
+
 # Recognized file extensions by media type — used to classify uploads before transcoding
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".ts", ".m2ts", ".mxf",
                     ".flv", ".wmv", ".webm", ".mpg", ".mpeg", ".m4v"}
@@ -186,6 +192,10 @@ def _video_transcode_cmd(input_path: str, output_path: str,
         "-vf", (f"scale={target_width}:{target_height}:force_original_aspect_ratio=decrease,"
                 f"pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2:black,"
                 f"fps={config.TRANSCODE_FRAMERATE}"),
+        # GOP size = framerate → 1-second keyframe interval for fast IPTV channel tune-in.
+        # Receivers must decode from a keyframe, so shorter GOPs reduce channel-change latency
+        # at the cost of slightly higher bitrate (more I-frames).
+        "-g", config.TRANSCODE_FRAMERATE,
         "-c:a", config.TRANSCODE_AUDIO_CODEC,
         "-b:a", config.TRANSCODE_AUDIO_BITRATE,
         "-ac", config.TRANSCODE_AUDIO_CHANNELS,
@@ -232,6 +242,8 @@ def _image_to_video_cmd(input_path: str, output_path: str) -> list:
                 f"fps={config.TRANSCODE_FRAMERATE}"),
         # yuv420p is required for broad compatibility (some encoders default to yuv444p for stills)
         "-pix_fmt", "yuv420p",
+        # 1-second GOP for fast IPTV tune-in (same as video transcode)
+        "-g", config.TRANSCODE_FRAMERATE,
         "-c:a", config.TRANSCODE_AUDIO_CODEC,
         "-b:a", config.TRANSCODE_AUDIO_BITRATE,
         # -shortest: end when the shorter stream (audio, capped by -t) finishes
@@ -273,6 +285,8 @@ def _audio_to_video_cmd(input_path: str, output_path: str,
         "-maxrate", config.TRANSCODE_VIDEO_MAXRATE,
         "-bufsize", config.TRANSCODE_VIDEO_BUFSIZE,
         "-pix_fmt", "yuv420p",
+        # 1-second GOP for fast IPTV tune-in (same as video transcode)
+        "-g", config.TRANSCODE_FRAMERATE,
         # Audio: transcode to AAC at the standard profile
         "-c:a", config.TRANSCODE_AUDIO_CODEC,
         "-b:a", config.TRANSCODE_AUDIO_BITRATE,
@@ -383,19 +397,30 @@ async def transcode_asset(asset_id: int, db_session_factory) -> None:
     It handles the full lifecycle: status tracking, thumbnail generation, transcoding,
     metadata extraction, and cleanup of the raw upload file.
 
+    Concurrency is limited by _transcode_semaphore (default 2) to prevent CPU/memory
+    saturation when multiple uploads arrive simultaneously. Queued transcodes wait
+    for a slot to open before starting.
+
     The flow is:
-      1. Mark asset as PROCESSING
-      2. Probe source for duration (needed for progress calculation)
-      3. Generate a thumbnail for the asset library
-      4. Transcode to standard profile (with live progress for video/audio)
-      5. Probe the transcoded output for final metadata
-      6. Update asset record with file path, dimensions, duration, size
-      7. Delete the raw upload file (the transcoded version is the canonical copy)
+      1. Acquire transcode semaphore slot (may wait if at capacity)
+      2. Mark asset as PROCESSING
+      3. Probe source for duration (needed for progress calculation)
+      4. Generate a thumbnail for the asset library
+      5. Transcode to standard profile (with live progress for video/audio)
+      6. Probe the transcoded output for final metadata
+      7. Update asset record with file path, dimensions, duration, size
+      8. Delete the raw upload file (the transcoded version is the canonical copy)
 
     Args:
         asset_id: Database ID of the Asset to transcode
         db_session_factory: Callable that returns a new SQLAlchemy Session
     """
+    async with _transcode_semaphore:
+        await _do_transcode(asset_id, db_session_factory)
+
+
+async def _do_transcode(asset_id: int, db_session_factory) -> None:
+    """Inner transcode logic — called under the concurrency semaphore."""
     db: Session = db_session_factory()
     try:
         asset = db.query(Asset).filter(Asset.id == asset_id).first()

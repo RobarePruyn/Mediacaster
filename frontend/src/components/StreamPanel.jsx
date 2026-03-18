@@ -29,6 +29,8 @@ import {
 } from '../api';
 
 export default function StreamPanel({ streams, selectedStreamId, onSelectStream, assets, isLoading, onRefresh, isAdmin }) {
+  /** True when the playlist has been modified while the stream is running */
+  const [playlistDirty, setPlaylistDirty] = useState(false);
   /** Whether the multicast output config is in edit mode */
   const [editing, setEditing] = useState(false);
   /** Form state for multicast output config (name, address, port, playback_mode) */
@@ -89,7 +91,9 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
         setBrowserAudio(currentStream.browser_source.capture_audio || false);
       }
     }
-  }, [currentStream]);
+    // Reset dirty flag when switching streams
+    setPlaylistDirty(false);
+  }, [selectedStreamId]);
 
   // ─── CRUD Operations ────────────────────────────────────────────────────────
 
@@ -140,8 +144,11 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
   // ─── Playlist Operations ────────────────────────────────────────────────────
 
   const handleRemoveItem = async (itemId) => {
-    try { await removePlaylistItem(selectedStreamId, itemId); onRefresh(); }
-    catch (e) { setErrorMsg(e.message); }
+    try {
+      await removePlaylistItem(selectedStreamId, itemId);
+      if (isRunning) setPlaylistDirty(true);
+      onRefresh();
+    } catch (e) { setErrorMsg(e.message); }
   };
 
   /**
@@ -155,8 +162,11 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
     if (target < 0 || target >= items.length) return;
     // Swap the two items in the local copy
     [items[idx], items[target]] = [items[target], items[idx]];
-    try { await reorderPlaylist(selectedStreamId, items.map(i => i.asset_id)); onRefresh(); }
-    catch (e) { setErrorMsg(e.message); }
+    try {
+      await reorderPlaylist(selectedStreamId, items.map(i => i.asset_id));
+      if (isRunning) setPlaylistDirty(true);
+      onRefresh();
+    } catch (e) { setErrorMsg(e.message); }
   };
 
   // ─── Transport Controls ─────────────────────────────────────────────────────
@@ -167,7 +177,11 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
    */
   const doAction = async (fn) => {
     setBusy(true); setErrorMsg('');
-    try { await fn(); onRefresh(); } catch (e) { setErrorMsg(e.message); }
+    try {
+      await fn();
+      setPlaylistDirty(false);
+      onRefresh();
+    } catch (e) { setErrorMsg(e.message); }
     finally { setBusy(false); }
   };
 
@@ -396,6 +410,11 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
         {!isBrowser && (
           <div className="playlist-section">
             <h3>Playlist ({currentStream.items.length} items)</h3>
+            {playlistDirty && isRunning && (
+              <div className="playlist-dirty-notice">
+                Playlist modified — restart the stream to apply changes.
+              </div>
+            )}
             {currentStream.items.length === 0 ? (
               <div className="empty-state">
                 Empty playlist. Use the "+ Stream" button on library assets.

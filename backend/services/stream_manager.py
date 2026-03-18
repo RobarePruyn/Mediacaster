@@ -23,7 +23,7 @@ import signal
 from typing import Dict, Optional
 from sqlalchemy.orm import Session
 from backend import config
-from backend.models import Stream, StreamStatus, PlaybackMode, AssetStatus
+from backend.models import Stream, StreamStatus, StreamSourceType, PlaybackMode, AssetStatus
 
 logger = logging.getLogger("stream_manager")
 
@@ -305,6 +305,44 @@ class StreamManager:
         except asyncio.CancelledError:
             # Watcher was cancelled by stop_stream() — expected, not an error
             pass
+
+    async def restore_sessions(self) -> None:
+        """
+        Re-start playlist streams that were running before a server restart.
+
+        Queries the DB for streams with status=RUNNING and source_type=PLAYLIST,
+        then attempts to start each one. Streams that fail to start are marked ERROR.
+        Called once during application startup from the lifespan handler.
+        """
+        db: Session = self._db_factory()
+        try:
+            stale_streams = db.query(Stream).filter(
+                Stream.status == StreamStatus.RUNNING,
+                Stream.source_type == StreamSourceType.PLAYLIST,
+            ).all()
+            stream_ids = [s.id for s in stale_streams]
+        finally:
+            db.close()
+
+        if not stream_ids:
+            return
+
+        logger.info("Restoring %d playlist stream(s): %s", len(stream_ids), stream_ids)
+        for sid in stream_ids:
+            try:
+                await self.start_stream(sid)
+                logger.info("Restored playlist stream %d", sid)
+            except Exception as exc:
+                logger.error("Failed to restore stream %d: %s", sid, exc)
+                db = self._db_factory()
+                try:
+                    s = db.query(Stream).filter(Stream.id == sid).first()
+                    if s:
+                        s.status = StreamStatus.ERROR
+                        s.ffmpeg_pid = None
+                        db.commit()
+                finally:
+                    db.close()
 
     async def stop_all(self) -> None:
         """Stop all active streams. Called during application shutdown."""

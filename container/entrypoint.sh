@@ -296,10 +296,10 @@ FFMPEG_CMD+=(
     -bufsize "$(echo "${VIDEO_BITRATE}" | sed 's/M//')M"
     # yuv420p is required for compatibility — many decoders reject yuv444p
     -pix_fmt yuv420p
-    # GOP size = 2× frame rate (e.g., 60 frames at 30fps = keyframe every 2s).
-    # Shorter GOPs allow faster channel-change/tune-in at the receiver but
-    # reduce compression efficiency.
-    -g "$(( ${FRAMERATE} * 2 ))"
+    # GOP size = frame rate → keyframe every 1 second for fast IPTV channel tune-in.
+    # Receivers must decode from a keyframe, so 1-second GOPs minimize channel-change
+    # latency at the cost of slightly higher bitrate (more I-frames).
+    -g "${FRAMERATE}"
     # Audio encoding: AAC at 48kHz stereo — standard for broadcast MPEG-TS
     -c:a aac
     -b:a "${AUDIO_BITRATE}"

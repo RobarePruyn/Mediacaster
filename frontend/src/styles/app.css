@@ -165,6 +165,7 @@ body { font-family: var(--font-body); font-size: 14px; line-height: 1.5; color: 
 
 .playlist-section { background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 14px; }
 .playlist-section h3 { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-secondary); margin-bottom: 10px; }
+.playlist-dirty-notice { padding: 8px 12px; background: rgba(245,158,11,0.1); border: 1px solid rgba(245,158,11,0.25); border-radius: var(--radius-sm); color: #f59e0b; font-size: 12px; margin-bottom: 10px; }
 .playlist { display: flex; flex-direction: column; gap: 4px; }
 .playlist-item { display: flex; align-items: center; gap: 10px; padding: 6px 8px; background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--radius-sm); }
 .playlist-position { width: 24px; text-align: center; font-size: 12px; color: var(--text-muted); }

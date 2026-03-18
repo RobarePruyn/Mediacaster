@@ -23,7 +23,7 @@ Mediacaster is a web-based MPEG-TS multicast playout system. Users upload media 
   - `backend/services/monitor.py` — psutil-based CPU/RAM/network monitoring, per-PID stats
 
 ### Frontend (React SPA)
-- **Build tool:** Create React App (CRA) — migration to Vite is a future task
+- **Build tool:** Vite (migrated from Create React App)
 - **Entry:** `frontend/src/App.jsx` — auth state, forced password change flow
 - **API client:** `frontend/src/api.js` — JWT-authenticated fetch wrapper, all endpoints
 - **Components:**
@@ -42,7 +42,7 @@ Mediacaster is a web-based MPEG-TS multicast playout system. Users upload media 
 
 ### Infrastructure
 - **deploy.sh** — full AlmaLinux deployment (repos, packages, podman, venv, frontend build, container image build, systemd, nginx, firewall, SELinux, multicast routing, sudoers)
-- **nginx/multicast-streamer.conf** — reverse proxy for API + static frontend. Has a noVNC regex proxy block but it doesn't work reliably with variable ports (nginx needs resolver for variable proxy_pass and it's fragile). Current workaround: noVNC iframe connects directly to the websockify port.
+- **nginx/multicast-streamer.conf** — reverse proxy for API + static frontend. noVNC iframe connects directly to the websockify port (6080-6180 range opened in firewall).
 - **systemd/multicast-streamer.service** — runs as `mcs` user, `ExecStartPre=+` for /run/user creation, relaxed sandboxing for Podman
 - **requirements.txt** — fastapi, uvicorn, sqlalchemy, python-jose, passlib, bcrypt<4.1, python-multipart, aiofiles, psutil
 
@@ -73,13 +73,14 @@ Mediacaster is a web-based MPEG-TS multicast playout system. Users upload media 
 8. ~~**ExecStartPre in systemd**~~ — Fixed. `+` prefix added for root execution.
 
 ### Important
-3. **nginx noVNC proxy doesn't work** — Regex capture variables in `proxy_pass` require a `resolver` directive, and even with one configured it's unreliable. Current workaround: iframe connects directly to websockify port (6080-6180 range opened in firewall). The nginx location block for `/novnc/` exists but isn't functional.
-4. **Default nginx server block in `/etc/nginx/nginx.conf`** — Lines 37-45 must be commented out or our config gets shadowed. deploy.sh should handle this automatically.
-5. **npm deprecation warning** — `deploy.sh` uses `--production=false`, should be `--include=dev`
-6. ~~**Multicast route persistence**~~ — Fixed. NetworkManager dispatcher script at `/etc/NetworkManager/dispatcher.d/99-multicast-route` adds `239.0.0.0/8 dev $1` on interface up. The old deploy.sh approach using `/etc/sysconfig/network-scripts/route-multicast` was unreliable.
+(none currently)
 
-### Nice to Have
-7. **Migrate CRA to Vite** — CRA is abandoned, npm audit will always scream
+### Resolved (2026-03-17, batch 2)
+3. ~~**nginx noVNC proxy**~~ — Removed. Direct websockify port access is the stable solution; the fragile regex proxy block has been deleted from nginx config.
+4. ~~**Default nginx server block**~~ — Fixed. deploy.sh now auto-comments out the embedded server block in `/etc/nginx/nginx.conf`.
+5. ~~**npm deprecation warning**~~ — Fixed. deploy.sh uses `--include=dev`.
+6. ~~**Multicast route persistence**~~ — Fixed. NetworkManager dispatcher script at `/etc/NetworkManager/dispatcher.d/99-multicast-route` adds `239.0.0.0/8 dev $1` on interface up. deploy.sh now installs this automatically.
+7. ~~**Migrate CRA to Vite**~~ — Done. Frontend now uses Vite for builds. Output directory changed from `build/` to `dist/`, entry point from `src/index.js` to `src/main.jsx`.
 
 ## Code Style Preferences
 - **Comments:** All generated code should be well-commented with explanatory inline comments
@@ -101,4 +102,4 @@ Mediacaster is a web-based MPEG-TS multicast playout system. Users upload media 
 - Remote: https://github.com/RobarePruyn/Mediacaster.git
 - Branch: `main`
 - Commit messages should be descriptive
-- Never commit `node_modules/`, `__pycache__/`, `venv/`, `db/`, `media/`, `uploads/`, `thumbnails/`, `frontend/build/`
+- Never commit `node_modules/`, `__pycache__/`, `venv/`, `db/`, `media/`, `uploads/`, `thumbnails/`, `frontend/dist/`

@@ -5,7 +5,7 @@ venv/
 
 # Node
 frontend/node_modules/
-frontend/build/
+frontend/dist/
 
 # Application data
 db/

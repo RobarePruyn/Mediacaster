@@ -18,7 +18,11 @@ also be changed at runtime via the Settings API, which persists them to the
 """
 
 import os
+import secrets
+import logging
 from pathlib import Path
+
+_config_logger = logging.getLogger("config")
 
 # ── Filesystem paths ──────────────────────────────────────────────────────────
 # BASE_DIR is the root installation directory. All data subdirectories live here.
@@ -68,8 +72,19 @@ MAX_BANDWIDTH_UTILIZATION_PERCENT = float(os.getenv("MCS_MAX_BW_PCT", "80.0"))
 NETWORK_LINK_SPEED_MBPS = float(os.getenv("MCS_LINK_SPEED_MBPS", "1000.0"))
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
-# IMPORTANT: SECRET_KEY must be changed in production — it signs all JWT tokens.
-SECRET_KEY = os.getenv("MCS_SECRET_KEY", "CHANGE-ME-IN-PRODUCTION-please")
+# JWT signing key. If the default placeholder is still in use (no MCS_SECRET_KEY env var),
+# generate a random key at startup. This means tokens won't survive a server restart
+# (all users will need to log in again), which is safer than using a well-known default.
+_raw_secret = os.getenv("MCS_SECRET_KEY", "")
+if not _raw_secret or _raw_secret == "CHANGE-ME-IN-PRODUCTION-please":
+    SECRET_KEY = secrets.token_urlsafe(64)
+    _config_logger.warning(
+        "MCS_SECRET_KEY not set — generated a random JWT secret. "
+        "Tokens will not persist across restarts. Set MCS_SECRET_KEY in the environment "
+        "or systemd unit for stable sessions."
+    )
+else:
+    SECRET_KEY = _raw_secret
 # Token lifetime: 480 minutes = 8 hours (one broadcast shift)
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("MCS_TOKEN_EXPIRE_MIN", "480"))
 # Default admin credentials — created on first run if no admin exists.

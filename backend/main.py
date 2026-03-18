@@ -23,7 +23,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy import text
 from backend.config import CORS_ORIGINS, DEFAULT_ADMIN_USERNAME, DEFAULT_ADMIN_PASSWORD
 from backend.database import init_db, SessionLocal
-from backend.models import User
+from backend.models import User, Asset, AssetStatus, Stream, StreamStatus, StreamSourceType
 from backend.auth import hash_password
 from backend.services.stream_manager import StreamManager
 from backend.services.browser_manager import BrowserManager
@@ -141,6 +141,21 @@ async def lifespan(app: FastAPI):
     finally:
         db.close()
 
+    # Reset any assets stuck in PROCESSING state from a previous crash.
+    # If the server was killed mid-transcode, these assets will never complete
+    # on their own — mark them as ERROR so the user knows to re-upload.
+    db = SessionLocal()
+    try:
+        stale_count = db.query(Asset).filter(
+            Asset.status == AssetStatus.PROCESSING
+        ).update({Asset.status: AssetStatus.ERROR,
+                  Asset.error_message: "Server restarted during transcode"})
+        if stale_count:
+            db.commit()
+            logger.info("Reset %d stale PROCESSING assets to ERROR", stale_count)
+    finally:
+        db.close()
+
     # StreamManager handles ffmpeg concat-demuxer subprocesses for playlist streams.
     # BrowserManager handles Podman containers for browser source capture.
     # Both need a session factory to update stream status in the DB independently.
@@ -153,6 +168,14 @@ async def lifespan(app: FastAPI):
         await app.state.browser_manager.restore_sessions()
     except Exception as exc:
         logger.error("Browser session restore failed: %s", exc)
+
+    # Restore playlist streams that were running before the server restarted.
+    # Unlike browser sources (which need container re-creation), playlist streams
+    # just need their ffmpeg process relaunched with the same concat file.
+    try:
+        await app.state.stream_manager.restore_sessions()
+    except Exception as exc:
+        logger.error("Playlist stream restore failed: %s", exc)
 
     logger.info("Multicast Streamer ready")
     yield  # Application is running — control returns here on shutdown
@@ -180,12 +203,13 @@ app.include_router(stream_routes.router)
 app.include_router(settings_routes.router)
 
 # ── React SPA static file serving ────────────────────────────────────────────
-# In production, the React app is pre-built into frontend/build/.
+# In production, the React app is pre-built into frontend/dist/.
 # We serve /static/* directly and route everything else to index.html
 # so that React Router handles client-side navigation.
-FRONTEND_BUILD = Path(__file__).parent.parent / "frontend" / "build"
-if FRONTEND_BUILD.exists():
-    app.mount("/static", StaticFiles(directory=FRONTEND_BUILD / "static"), name="static")
+FRONTEND_DIST = Path(__file__).parent.parent / "frontend" / "dist"
+if FRONTEND_DIST.exists():
+    # Vite outputs hashed assets to dist/assets/ (CRA used dist/static/)
+    app.mount("/assets", StaticFiles(directory=FRONTEND_DIST / "assets"), name="assets")
 
     @app.get("/{full_path:path}")
     async def serve_spa(full_path: str):
@@ -193,10 +217,10 @@ if FRONTEND_BUILD.exists():
         # Don't intercept API routes — let FastAPI's router handle those
         if full_path.startswith("api/"):
             return None
-        index = FRONTEND_BUILD / "index.html"
+        index = FRONTEND_DIST / "index.html"
         return FileResponse(str(index)) if index.exists() else {"detail": "Frontend not built"}
 else:
-    # Development mode — frontend is served by CRA dev server on :3000
+    # Development mode — frontend is served by Vite dev server on :3000
     @app.get("/")
     async def root():
         """Minimal response when frontend build is not present."""
