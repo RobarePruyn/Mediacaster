@@ -138,8 +138,11 @@ fi
 # since the mcs service user connects with a password.
 PG_HBA="/var/lib/pgsql/data/pg_hba.conf"
 if ! grep -q "mcs.*mediacaster.*scram-sha-256" "${PG_HBA}" 2>/dev/null; then
-    # Insert our rule before the default local rules so it takes priority
+    # Insert our rules before the default local rules so they take priority.
+    # Both IPv4 (127.0.0.1) and IPv6 (::1) are needed because "localhost"
+    # may resolve to either address depending on the system's DNS config.
     sed -i '/^# IPv4 local connections/a host    mediacaster     mcs             127.0.0.1/32            scram-sha-256' "${PG_HBA}"
+    sed -i '/^# IPv6 local connections/a host    mediacaster     mcs             ::1/128                 scram-sha-256' "${PG_HBA}"
     # Also allow local socket connections with password auth
     sed -i '/^# "local" is for Unix domain/a local   mediacaster     mcs                                     scram-sha-256' "${PG_HBA}"
     systemctl restart postgresql
