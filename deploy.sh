@@ -336,6 +336,11 @@ if systemctl is-active --quiet firewalld; then
     # Without this rule, firewalld drops outbound multicast UDP packets from
     # ffmpeg, and receivers see no data even though ffmpeg reports success.
     firewall-cmd --permanent --add-rich-rule='rule family="ipv4" destination address="239.0.0.0/8" accept'
+    # Open noVNC websocket ports (6080-6180) and VNC ports (5950-6050) for
+    # browser source preview access. These are the ports websockify and x11vnc
+    # listen on inside containers running with --network=host.
+    firewall-cmd --permanent --add-port=6080-6180/tcp
+    firewall-cmd --permanent --add-port=5950-6050/tcp
     firewall-cmd --reload
     log_info "Firewall rules applied"
 else
