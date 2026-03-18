@@ -204,6 +204,11 @@ log_step "Step 5/9: Deploying application"
 cp -r "${SCRIPT_DIR}/backend" "${APP_DIR}/"
 cp "${SCRIPT_DIR}/requirements.txt" "${APP_DIR}/"
 cp -r "${SCRIPT_DIR}/frontend" "${APP_DIR}/"
+# Alembic database migration config and version scripts — required for
+# automatic schema creation/upgrade on startup (backend/main.py calls
+# alembic.command.upgrade("head") during lifespan initialization)
+cp "${SCRIPT_DIR}/alembic.ini" "${APP_DIR}/"
+cp -r "${SCRIPT_DIR}/alembic" "${APP_DIR}/"
 
 log_info "Creating Python virtual environment..."
 "${PYTHON3_BIN}" -m venv "${APP_DIR}/venv"
