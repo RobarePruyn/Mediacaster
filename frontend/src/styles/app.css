@@ -67,6 +67,14 @@ body { font-family: var(--font-body); font-size: 14px; line-height: 1.5; color: 
 .login-form .form-group { margin-bottom: 16px; }
 .login-error { padding: 10px 12px; background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.25); border-radius: var(--radius-sm); color: var(--status-error); font-size: 13px; margin-bottom: 16px; }
 .login-btn { width: 100%; padding: 10px; font-size: 14px; margin-top: 8px; }
+/* SSO divider and button on the login page */
+.login-divider { display: flex; align-items: center; gap: 12px; margin: 20px 0 16px; color: var(--text-muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; }
+.login-divider::before, .login-divider::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+.btn-sso { width: 100%; padding: 10px; font-size: 14px; background: rgba(139,92,246,0.15); color: #a78bfa; border: 1px solid rgba(139,92,246,0.3); border-radius: var(--radius-md); cursor: pointer; font-family: var(--font-body); font-weight: 500; transition: all 120ms ease; }
+.btn-sso:hover:not(:disabled) { background: rgba(139,92,246,0.25); }
+.btn-sso:disabled { opacity: 0.4; cursor: not-allowed; }
+/* Purple badge for SSO users in the admin user list */
+.badge-oidc { background: rgba(139,92,246,0.15); color: #a78bfa; border: 1px solid rgba(139,92,246,0.3); }
 
 /* Layout */
 .layout { display: flex; flex-direction: column; min-height: 100vh; }

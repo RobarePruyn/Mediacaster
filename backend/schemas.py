@@ -107,6 +107,21 @@ class UserListResponse(BaseModel):
     total_count: int
 
 
+# ── OIDC / SSO ───────────────────────────────────────────────────────────────
+
+class OIDCCallbackRequest(BaseModel):
+    """Request body for the OIDC callback endpoint (code exchange)."""
+    code: str
+    state: str
+    redirect_uri: str
+
+
+class OIDCConfigResponse(BaseModel):
+    """Public OIDC configuration returned to the login page (no auth required)."""
+    enabled: bool
+    display_name: str
+
+
 # ── Assets ────────────────────────────────────────────────────────────────────
 
 class AssetResponse(BaseModel):

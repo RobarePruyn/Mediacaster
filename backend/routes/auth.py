@@ -16,7 +16,7 @@ access /login, /me, and /change-password.
 """
 
 import logging
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 from backend.database import get_db
 from backend.models import User, UserStreamAssignment, generate_strong_password
@@ -24,8 +24,10 @@ from backend.schemas import (
     LoginRequest, TokenResponse, UserResponse, ChangePasswordRequest,
     UserCreateRequest, UserCreateResponse, UserUpdateRequest,
     UserResetPasswordResponse, UserListResponse,
+    OIDCCallbackRequest, OIDCConfigResponse,
 )
 from backend.auth import verify_password, hash_password, create_access_token, get_current_user
+from backend import config
 
 logger = logging.getLogger("auth")
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -84,7 +86,11 @@ def change_password(request: ChangePasswordRequest, db: Session = Depends(get_db
     Validates that the current password is correct and the new password
     is different. Clears the must_change_password flag so the user
     won't be prompted again after the forced first-login change.
+    OIDC users cannot change their password here — they must use the IdP.
     """
+    # OIDC users authenticate externally — password changes must go through the IdP
+    if current_user.auth_provider != "local":
+        raise HTTPException(status_code=400, detail="Password changes are managed by your SSO provider")
     if not verify_password(request.current_password, current_user.hashed_password):
         raise HTTPException(status_code=400, detail="Current password is incorrect")
     # Prevent no-op password changes that would confuse the must_change flow
@@ -190,6 +196,9 @@ def reset_user_password(user_id: int, db: Session = Depends(get_db),
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    # OIDC users authenticate externally — cannot reset their local password
+    if user.auth_provider != "local":
+        raise HTTPException(status_code=400, detail="Cannot reset password for SSO users")
 
     new_password = generate_strong_password()
     user.hashed_password = hash_password(new_password)
@@ -218,3 +227,109 @@ def delete_user(user_id: int, db: Session = Depends(get_db),
     db.delete(user)
     db.commit()
     logger.info("Admin %s deleted user %s", current_user.username, user.username)
+
+
+# ---------------------------------------------------------------------------
+# OIDC / SSO endpoints (no auth required — used before the user has a JWT)
+# ---------------------------------------------------------------------------
+
+@router.get("/oidc/config", response_model=OIDCConfigResponse)
+def oidc_config():
+    """Return public OIDC configuration for the login page.
+
+    No authentication required — the frontend needs this to decide whether
+    to show the SSO button before the user has logged in.
+    """
+    return OIDCConfigResponse(
+        enabled=config.OIDC_ENABLED,
+        display_name=config.OIDC_DISPLAY_NAME,
+    )
+
+
+@router.get("/oidc/authorize")
+async def oidc_authorize(redirect_uri: str = Query(...)):
+    """Build and return the OIDC authorization URL.
+
+    The frontend redirects the browser to this URL. After the user
+    authenticates with the IdP, they're sent back to redirect_uri
+    with a code and state in the query string.
+    """
+    if not config.OIDC_ENABLED:
+        raise HTTPException(status_code=400, detail="OIDC is not enabled")
+
+    from backend.services.oidc import build_authorization_url
+    try:
+        url = await build_authorization_url(redirect_uri)
+        return {"authorization_url": url}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/oidc/callback", response_model=TokenResponse)
+async def oidc_callback(body: OIDCCallbackRequest, db: Session = Depends(get_db)):
+    """Exchange an OIDC authorization code for an application JWT.
+
+    Performs the code→token exchange with the IdP, validates the ID token,
+    then finds or auto-provisions a local User record. Returns a standard
+    TokenResponse so the frontend's auth flow is identical to local login.
+
+    Auto-provisioning: First OIDC login creates a user with is_admin=False,
+    must_change_password=False, auth_provider="oidc", external_id=sub.
+    Username collision with existing local users is resolved by appending _2, _3, etc.
+    """
+    if not config.OIDC_ENABLED:
+        raise HTTPException(status_code=400, detail="OIDC is not enabled")
+
+    from backend.services.oidc import exchange_code, derive_username
+    try:
+        claims = await exchange_code(body.code, body.state, body.redirect_uri)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.error("OIDC callback error: %s", exc)
+        raise HTTPException(status_code=400, detail="OIDC authentication failed")
+
+    sub = claims.get("sub")
+    if not sub:
+        raise HTTPException(status_code=400, detail="ID token missing 'sub' claim")
+
+    # Look up existing OIDC user by external_id (sub claim)
+    user = db.query(User).filter(
+        User.auth_provider == "oidc", User.external_id == sub
+    ).first()
+
+    if user is None:
+        # Auto-provision a new user from OIDC claims
+        base_username = derive_username(claims)
+        username = base_username
+
+        # Resolve username collision with existing local users
+        suffix = 2
+        while db.query(User).filter(User.username == username).first() is not None:
+            username = f"{base_username}_{suffix}"
+            suffix += 1
+
+        user = User(
+            username=username,
+            # Placeholder hash — OIDC users never authenticate via local password
+            hashed_password=hash_password(generate_strong_password()),
+            is_active=True,
+            is_admin=False,
+            must_change_password=False,
+            auth_provider="oidc",
+            external_id=sub,
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        logger.info("Auto-provisioned OIDC user '%s' (sub=%s)", username, sub)
+
+    # Check if the account has been disabled by an admin
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="Account is disabled")
+
+    # Mint an application JWT — from here on, the API layer is unchanged
+    return TokenResponse(
+        access_token=create_access_token(subject=user.username),
+        must_change_password=False,
+    )

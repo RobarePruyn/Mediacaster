@@ -213,7 +213,15 @@ export default function Settings({ currentUser }) {
                           'transcode_audio_bitrate', 'transcode_video_preset', 'transcode_video_profile'],
     'Media Defaults': ['static_image_duration'],
     'Multicast Defaults': ['default_multicast_address', 'default_multicast_port', 'multicast_ttl'],
+    'Single Sign-On (OIDC)': ['oidc_enabled', 'oidc_discovery_url', 'oidc_client_id',
+                               'oidc_client_secret', 'oidc_display_name'],
   };
+
+  // Settings that need special input types
+  const dropdownSettings = {
+    'oidc_enabled': ['true', 'false'],
+  };
+  const passwordSettings = ['oidc_client_secret'];
 
   return (
     <div className="settings-panel">
@@ -282,6 +290,7 @@ export default function Settings({ currentUser }) {
                         {user.is_admin && <span className="badge badge-sm badge-warning">admin</span>}
                         {!user.is_active && <span className="badge badge-sm badge-error">disabled</span>}
                         {user.must_change_password && <span className="badge badge-sm badge-info">pw change</span>}
+                        {user.auth_provider === 'oidc' && <span className="badge badge-sm badge-oidc">SSO</span>}
                       </div>
                     </div>
                     <div className="user-row-actions">
@@ -299,8 +308,11 @@ export default function Settings({ currentUser }) {
                         onClick={() => handleSelectUserForAssign(user.id)}>
                         Channels
                       </button>
-                      <button className="btn btn-xs btn-warning"
-                        onClick={() => handleResetPassword(user.id)}>Reset PW</button>
+                      {/* OIDC users authenticate externally — no local password to reset */}
+                      {user.auth_provider === 'local' && (
+                        <button className="btn btn-xs btn-warning"
+                          onClick={() => handleResetPassword(user.id)}>Reset PW</button>
+                      )}
                       {/* Cannot delete yourself — prevents admin lockout */}
                       {user.id !== currentUser.id && (
                         <button className="btn btn-xs btn-delete"
@@ -370,8 +382,20 @@ export default function Settings({ currentUser }) {
                         <span className="setting-key">{s.key.replace(/_/g, ' ')}</span>
                         <span className="setting-desc">{s.description}</span>
                       </div>
-                      <input className="setting-input" type="text" value={editValues[key] || ''}
-                        onChange={e => setEditValues({ ...editValues, [key]: e.target.value })} />
+                      {/* Render dropdown for boolean settings, password for secrets, text for everything else */}
+                      {dropdownSettings[key] ? (
+                        <select className="setting-input" value={editValues[key] || ''}
+                          onChange={e => setEditValues({ ...editValues, [key]: e.target.value })}>
+                          {dropdownSettings[key].map(opt => (
+                            <option key={opt} value={opt}>{opt}</option>
+                          ))}
+                        </select>
+                      ) : (
+                        <input className="setting-input"
+                          type={passwordSettings.includes(key) ? 'password' : 'text'}
+                          value={editValues[key] || ''}
+                          onChange={e => setEditValues({ ...editValues, [key]: e.target.value })} />
+                      )}
                     </div>
                   );
                 })}
@@ -397,7 +421,8 @@ export default function Settings({ currentUser }) {
               <span className="setting-key">Role</span><span>{currentUser?.is_admin ? 'Administrator' : 'User'}</span>
             </div>
           </div>
-          <div className="settings-group">
+          {/* OIDC users manage passwords through their identity provider */}
+          {currentUser?.auth_provider !== 'oidc' && <div className="settings-group">
             <h3 className="settings-group-title">Change Password</h3>
             <form onSubmit={handleChangePassword}>
               {pwError && <div className="login-error">{pwError}</div>}
@@ -418,7 +443,7 @@ export default function Settings({ currentUser }) {
                 {pwLoading ? 'Changing...' : 'Change Password'}
               </button>
             </form>
-          </div>
+          </div>}
         </div>
       )}
     </div>

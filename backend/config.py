@@ -99,6 +99,16 @@ DEFAULT_ADMIN_PASSWORD = os.getenv("MCS_ADMIN_PASS", "changeme")
 # CORS origins — comma-separated list. "*" allows all (fine for dev, restrict in prod).
 CORS_ORIGINS = os.getenv("MCS_CORS_ORIGINS", "*").split(",")
 
+# ── OIDC / SSO ────────────────────────────────────────────────────────────────
+# Generic OIDC Authorization Code flow for enterprise SSO (Cognito, Azure AD,
+# Okta, Keycloak, etc.). These defaults are overwritten from DB settings at
+# startup via _apply_runtime_settings() in routes/settings.py.
+OIDC_ENABLED = os.getenv("MCS_OIDC_ENABLED", "false").lower() == "true"
+OIDC_DISCOVERY_URL = os.getenv("MCS_OIDC_DISCOVERY_URL", "")
+OIDC_CLIENT_ID = os.getenv("MCS_OIDC_CLIENT_ID", "")
+OIDC_CLIENT_SECRET = os.getenv("MCS_OIDC_CLIENT_SECRET", "")
+OIDC_DISPLAY_NAME = os.getenv("MCS_OIDC_DISPLAY_NAME", "SSO")
+
 # ── External tool paths ───────────────────────────────────────────────────────
 # Absolute paths to ffmpeg/ffprobe binaries. Override if they're installed
 # in a non-standard location (e.g., a custom build in /usr/local/bin/).

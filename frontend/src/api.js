@@ -86,6 +86,53 @@ export async function changePassword(currentPassword, newPassword) {
   });
 }
 
+// ─── OIDC / SSO ──────────────────────────────────────────────────────────────
+
+/**
+ * Fetches public OIDC configuration (enabled state and display name).
+ * Uses raw fetch — no auth token needed since this is called before login.
+ */
+export async function getOIDCConfig() {
+  const resp = await fetch(`${API_BASE}/auth/oidc/config`);
+  if (!resp.ok) throw new Error('Failed to fetch OIDC config');
+  return resp.json();
+}
+
+/**
+ * Gets the OIDC authorization URL from the backend.
+ * The frontend will redirect the browser to this URL.
+ */
+export async function getOIDCAuthorizeUrl(redirectUri) {
+  const params = new URLSearchParams({ redirect_uri: redirectUri });
+  const resp = await fetch(`${API_BASE}/auth/oidc/authorize?${params}`);
+  if (!resp.ok) {
+    let msg = 'Failed to get authorization URL';
+    try { const body = await resp.json(); msg = body.detail || msg; } catch {}
+    throw new Error(msg);
+  }
+  return resp.json();
+}
+
+/**
+ * Exchanges an OIDC authorization code for an application JWT.
+ * Stores the returned token in localStorage so subsequent API calls are authenticated.
+ */
+export async function oidcCallback(code, state, redirectUri) {
+  const resp = await fetch(`${API_BASE}/auth/oidc/callback`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ code, state, redirect_uri: redirectUri }),
+  });
+  if (!resp.ok) {
+    let msg = 'OIDC login failed';
+    try { const body = await resp.json(); msg = body.detail || msg; } catch {}
+    throw new Error(msg);
+  }
+  const data = await resp.json();
+  setStoredToken(data.access_token);
+  return data;
+}
+
 // ─── Assets ───────────────────────────────────────────────────────────────────
 
 /**

@@ -99,6 +99,27 @@ DEFAULT_SETTINGS = {
         "value": str(config.NETWORK_LINK_SPEED_MBPS),
         "description": "NIC link speed in Mbps (e.g. 1000 for 1 Gbps) — used for bandwidth % calculation",
     },
+    # OIDC / SSO settings — generic OpenID Connect Authorization Code flow
+    "oidc_enabled": {
+        "value": str(config.OIDC_ENABLED).lower(),
+        "description": "Enable OIDC single sign-on (true/false)",
+    },
+    "oidc_discovery_url": {
+        "value": config.OIDC_DISCOVERY_URL,
+        "description": "OIDC discovery URL (e.g. https://idp.example.com/.well-known/openid-configuration)",
+    },
+    "oidc_client_id": {
+        "value": config.OIDC_CLIENT_ID,
+        "description": "OIDC client ID registered with the identity provider",
+    },
+    "oidc_client_secret": {
+        "value": config.OIDC_CLIENT_SECRET,
+        "description": "OIDC client secret (keep confidential)",
+    },
+    "oidc_display_name": {
+        "value": config.OIDC_DISPLAY_NAME,
+        "description": "Label shown on the SSO login button (e.g. 'Corporate SSO', 'Okta')",
+    },
 }
 
 
@@ -216,6 +237,12 @@ def _apply_runtime_settings(db: Session):
         config.MAX_MEMORY_UTILIZATION_PERCENT = float(get_setting_value(db, "max_memory_utilization", "80.0"))
         config.MAX_BANDWIDTH_UTILIZATION_PERCENT = float(get_setting_value(db, "max_bandwidth_utilization", "80.0"))
         config.NETWORK_LINK_SPEED_MBPS = float(get_setting_value(db, "network_link_speed_mbps", "1000.0"))
+        # OIDC / SSO settings
+        config.OIDC_ENABLED = get_setting_value(db, "oidc_enabled", "false").lower() == "true"
+        config.OIDC_DISCOVERY_URL = get_setting_value(db, "oidc_discovery_url", "")
+        config.OIDC_CLIENT_ID = get_setting_value(db, "oidc_client_id", "")
+        config.OIDC_CLIENT_SECRET = get_setting_value(db, "oidc_client_secret", "")
+        config.OIDC_DISPLAY_NAME = get_setting_value(db, "oidc_display_name", "SSO")
         logger.info("Runtime settings applied from database")
     except (ValueError, TypeError) as exc:
         logger.error("Failed to apply runtime settings: %s", exc)
