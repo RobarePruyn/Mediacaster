@@ -129,6 +129,19 @@ user_pref("browser.sessionstore.resume_from_crash", false);
 // and attempting GL calls causes rendering failures or black frames
 user_pref("layers.acceleration.disabled", true);
 user_pref("gfx.xrender.enabled", false);
+// Force H.264 for web video playback. VP9 and AV1 are far more expensive to
+// software-decode and will starve the x264 encoder of CPU. H.264 decodes
+// roughly 3x faster in software. YouTube and most sites will fall back to
+// H.264 when VP9/AV1 are disabled.
+user_pref("media.mediasource.vp9.enabled", false);
+user_pref("media.av1.enabled", false);
+// Reduce Firefox compositor overhead — async panning/zooming and smooth
+// scrolling add extra compositing passes that waste CPU in a headless kiosk
+user_pref("apz.allow_zooming", false);
+user_pref("general.smoothScroll", false);
+// Lower content process count — each process has rendering overhead.
+// In kiosk mode there's only one tab, so more processes just waste memory and CPU.
+user_pref("dom.ipc.processCount", 1);
 // Prevent safe mode prompt after a crash (container restarts look like crashes)
 user_pref("toolkit.startup.max_resumed_crashes", -1);
 // Force all new windows/popups into the same window and suppress
@@ -248,12 +261,22 @@ fi
 
 echo "[entrypoint] Starting ffmpeg capture → ${MULTICAST_URL}"
 
+# Calculate VBV buffer size at 2x the video bitrate. Extracts the numeric
+# portion (e.g., "8" from "8M") and doubles it. 2x gives the encoder enough
+# headroom to handle complexity spikes from x11grab without frame drops.
+BITRATE_NUM="${VIDEO_BITRATE%%[^0-9]*}"
+BUFSIZE="$((BITRATE_NUM * 2))M"
+
 # Build the ffmpeg command as an array for proper argument quoting.
 # The pipeline: x11grab input → libx264 encode → AAC audio → MPEG-TS mux → UDP output
 FFMPEG_CMD=(
     ffmpeg -y
     # Video input: capture the virtual X11 display at the configured
-    # resolution and frame rate
+    # resolution and frame rate.
+    # thread_queue_size: buffer up to 512 frames from x11grab so that
+    # momentary encoder stalls don't cause frame drops. The default (8)
+    # is far too small for live capture where frame delivery is bursty.
+    -thread_queue_size 512
     -f x11grab
     -framerate "${FRAMERATE}"
     -video_size "${RESOLUTION}"
@@ -264,7 +287,9 @@ if [[ "${CAPTURE_AUDIO}" == "true" && -n "${PULSE_SINK}" ]]; then
     # Audio input: capture from the PulseAudio null-sink's monitor source.
     # The ".monitor" suffix is PulseAudio convention — it's a loopback tap
     # of everything being played into the sink by Firefox.
+    # thread_queue_size matches the video input to prevent audio drops.
     FFMPEG_CMD+=(
+        -thread_queue_size 512
         -f pulse
         -i "${PULSE_SINK}.monitor"
     )
@@ -279,6 +304,12 @@ else
 fi
 
 FFMPEG_CMD+=(
+    # Force constant frame rate output. x11grab delivers frames at irregular
+    # intervals (Xvfb has no vsync), so without CFR enforcement the MPEG-TS
+    # output has variable frame timing that receivers display as choppy video.
+    # cfr duplicates or drops frames as needed to maintain steady output.
+    -vsync cfr
+    -r "${FRAMERATE}"
     # Video encoding: H.264 Main profile for broad receiver compatibility.
     # "ultrafast" preset minimizes encoding latency at the cost of bitrate
     # efficiency — acceptable for live capture where latency matters more
@@ -290,10 +321,11 @@ FFMPEG_CMD+=(
     -tune zerolatency
     -b:v "${VIDEO_BITRATE}"
     -maxrate "${VIDEO_BITRATE}"
-    # bufsize controls the VBV (video buffering verifier) buffer. Setting it
-    # equal to bitrate gives a 1-second buffer — tight enough for low latency
-    # but large enough to avoid excessive quality fluctuation.
-    -bufsize "$(echo "${VIDEO_BITRATE}" | sed 's/M//')M"
+    # bufsize controls the VBV buffer. 2x bitrate gives a 2-second buffer —
+    # more headroom for the encoder to handle scene complexity spikes from
+    # x11grab (page loads, video playback, animations) without dropping
+    # quality or frames. The original 1x was too tight for live capture.
+    -bufsize "${BUFSIZE}"
     # yuv420p is required for compatibility — many decoders reject yuv444p
     -pix_fmt yuv420p
     # GOP size = frame rate → keyframe every 1 second for fast IPTV channel tune-in.
