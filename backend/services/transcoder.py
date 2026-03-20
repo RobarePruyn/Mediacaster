@@ -226,56 +226,6 @@ def _video_transcode_cmd(input_path: str, output_path: str,
     return cmd
 
 
-def _animated_gif_to_video_cmd(input_path: str, output_path: str,
-                                with_progress: bool = False) -> list:
-    """
-    Build ffmpeg command to transcode an animated GIF to the standard video profile.
-
-    Animated GIFs have no audio stream, so we generate silent audio with anullsrc
-    (same approach as _audio_to_video_cmd). The -ignore_loop 0 flag tells ffmpeg
-    to play the GIF once rather than looping infinitely.
-
-    Args:
-        input_path: Path to the animated GIF file
-        output_path: Destination path for the transcoded .mp4
-        with_progress: If True, add -progress pipe:1 for real-time progress parsing
-
-    Returns:
-        Complete ffmpeg command as a list of strings
-    """
-    target_width, target_height = config.TRANSCODE_RESOLUTION.split("x")
-    cmd = [config.FFMPEG_PATH, "-y"]
-    if with_progress:
-        cmd += ["-progress", "pipe:1", "-nostats"]
-    cmd += [
-        # -ignore_loop 0 plays the GIF animation once (not infinitely)
-        "-ignore_loop", "0",
-        "-i", input_path,
-        # Generate silent audio to match the GIF duration — MPEG-TS receivers
-        # expect both audio and video PIDs
-        "-f", "lavfi", "-i", f"anullsrc=r={config.TRANSCODE_AUDIO_SAMPLERATE}:cl=stereo",
-        "-c:v", config.TRANSCODE_VIDEO_CODEC,
-        "-profile:v", config.TRANSCODE_VIDEO_PROFILE,
-        "-preset", config.TRANSCODE_VIDEO_PRESET,
-        "-b:v", config.TRANSCODE_VIDEO_BITRATE,
-        "-maxrate", config.TRANSCODE_VIDEO_MAXRATE,
-        "-bufsize", config.TRANSCODE_VIDEO_BUFSIZE,
-        "-vf", (f"scale={target_width}:{target_height}:force_original_aspect_ratio=decrease,"
-                f"pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2:black,"
-                f"fps={config.TRANSCODE_FRAMERATE}"),
-        "-pix_fmt", "yuv420p",
-        "-g", config.TRANSCODE_FRAMERATE,
-        "-c:a", config.TRANSCODE_AUDIO_CODEC,
-        "-b:a", config.TRANSCODE_AUDIO_BITRATE,
-        "-ac", config.TRANSCODE_AUDIO_CHANNELS,
-        "-ar", config.TRANSCODE_AUDIO_SAMPLERATE,
-        # -shortest: end when the GIF animation finishes (anullsrc is infinite)
-        "-shortest",
-        "-movflags", "+faststart", "-f", "mp4", output_path,
-    ]
-    return cmd
-
-
 def _image_to_video_cmd(input_path: str, output_path: str) -> list:
     """
     Build ffmpeg command to convert a static image into a video clip.
@@ -550,16 +500,13 @@ async def _do_transcode(asset_id: int, db_session_factory) -> None:
         raw_path = str(config.UPLOAD_DIR / asset.original_filename)
 
         # GIF handling: probe to determine if animated or static.
-        # Animated GIFs are reclassified as VIDEO so they go through a dedicated
-        # transcode pipeline that generates silent audio (GIFs have no audio stream).
+        # Animated GIFs are reclassified as VIDEO and go through the standard video
+        # transcode pipeline (which handles missing audio via anullsrc).
         # Static GIFs stay as IMAGE and get converted to a timed clip like other stills.
-        is_animated_gif = False
         if Path(raw_path).suffix.lower() == ".gif":
-            animated = await _is_animated_gif(raw_path)
-            if animated:
+            if await _is_animated_gif(raw_path):
                 logger.info("Asset %d is an animated GIF — treating as video", asset_id)
                 asset.asset_type = AssetType.VIDEO
-                is_animated_gif = True
                 db.commit()
             else:
                 logger.info("Asset %d is a static GIF — treating as image", asset_id)
@@ -598,10 +545,6 @@ async def _do_transcode(asset_id: int, db_session_factory) -> None:
         elif is_audio:
             # Audio transcodes can be long — track progress via ffmpeg stdout
             cmd = _audio_to_video_cmd(raw_path, out_path, with_progress=True)
-            rc, stderr = await _run_with_progress(cmd, source_duration, asset_id, db_session_factory)
-        elif is_animated_gif:
-            # Animated GIFs have no audio — use dedicated command with anullsrc
-            cmd = _animated_gif_to_video_cmd(raw_path, out_path, with_progress=True)
             rc, stderr = await _run_with_progress(cmd, source_duration, asset_id, db_session_factory)
         else:
             # Video transcodes can be very long — track progress via ffmpeg stdout.
