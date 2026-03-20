@@ -163,7 +163,8 @@ async def _run_with_progress(command: list, source_duration: float,
 
 
 def _video_transcode_cmd(input_path: str, output_path: str,
-                          with_progress: bool = False) -> list:
+                          with_progress: bool = False,
+                          has_audio: bool = True) -> list:
     """
     Build the ffmpeg command to transcode a video file to the standard profile.
 
@@ -172,10 +173,15 @@ def _video_transcode_cmd(input_path: str, output_path: str,
       2. pad:  Letterbox/pillarbox with black bars to fill the exact target resolution
       3. fps:  Force constant framerate (required for concat-demuxer playout)
 
+    If the source has no audio stream, silent audio is generated via anullsrc
+    so the output always has both video and audio PIDs (required for MPEG-TS
+    receivers and seamless concat-demuxer playout).
+
     Args:
         input_path: Path to the raw uploaded video file
         output_path: Destination path for the transcoded .mp4
         with_progress: If True, add -progress pipe:1 for real-time progress parsing
+        has_audio: Whether the source file contains an audio stream
 
     Returns:
         Complete ffmpeg command as a list of strings
@@ -186,8 +192,13 @@ def _video_transcode_cmd(input_path: str, output_path: str,
         # -progress pipe:1 writes progress key=value pairs to stdout
         # -nostats suppresses the default stderr progress line to avoid clutter
         cmd += ["-progress", "pipe:1", "-nostats"]
+    cmd += ["-i", input_path]
+    # If the source has no audio, generate silent audio so the output always
+    # has both PIDs. MPEG-TS receivers and concat-demuxer playout require it.
+    if not has_audio:
+        cmd += ["-f", "lavfi", "-i",
+                f"anullsrc=r={config.TRANSCODE_AUDIO_SAMPLERATE}:cl=stereo"]
     cmd += [
-        "-i", input_path,
         "-c:v", config.TRANSCODE_VIDEO_CODEC,
         "-profile:v", config.TRANSCODE_VIDEO_PROFILE,
         "-preset", config.TRANSCODE_VIDEO_PRESET,
@@ -206,9 +217,12 @@ def _video_transcode_cmd(input_path: str, output_path: str,
         "-b:a", config.TRANSCODE_AUDIO_BITRATE,
         "-ac", config.TRANSCODE_AUDIO_CHANNELS,
         "-ar", config.TRANSCODE_AUDIO_SAMPLERATE,
-        # faststart moves the moov atom to the beginning of the file for quicker playback start
-        "-movflags", "+faststart", "-f", "mp4", output_path,
     ]
+    # -shortest needed when using anullsrc (infinite source) so output ends
+    # when the video finishes
+    if not has_audio:
+        cmd += ["-shortest"]
+    cmd += ["-movflags", "+faststart", "-f", "mp4", output_path]
     return cmd
 
 
@@ -446,6 +460,21 @@ async def probe_media(file_path: str) -> dict:
         return {}
 
 
+def _has_audio_stream(probe_data: dict) -> bool:
+    """Check whether the probed media file contains an audio stream.
+
+    Args:
+        probe_data: Raw dict from ffprobe JSON output.
+
+    Returns:
+        True if at least one audio stream is present.
+    """
+    for stream in probe_data.get("streams", []):
+        if stream.get("codec_type") == "audio":
+            return True
+    return False
+
+
 def _extract_metadata(probe_data: dict) -> dict:
     """
     Extract human-relevant metadata fields from raw ffprobe output.
@@ -538,13 +567,16 @@ async def _do_transcode(asset_id: int, db_session_factory) -> None:
         is_image = (asset.asset_type == AssetType.IMAGE)
         is_audio = (asset.asset_type == AssetType.AUDIO)
 
-        # Probe source to get duration — needed for progress percentage calculation
-        # Images don't need probing; their duration is the configured STATIC_IMAGE_DURATION
+        # Probe source to get duration and stream info — needed for progress
+        # percentage calculation and detecting whether audio is present.
+        # Images don't need probing; their duration is the configured STATIC_IMAGE_DURATION.
         source_duration = 0.0
+        has_audio = True  # Assume true; overridden by probe for non-image assets
         if not is_image:
             source_probe = await probe_media(raw_path)
             source_meta = _extract_metadata(source_probe)
             source_duration = source_meta.get("duration_seconds", 0.0)
+            has_audio = _has_audio_stream(source_probe)
             asset.source_duration_seconds = source_duration
             db.commit()
         else:
@@ -572,8 +604,9 @@ async def _do_transcode(asset_id: int, db_session_factory) -> None:
             cmd = _animated_gif_to_video_cmd(raw_path, out_path, with_progress=True)
             rc, stderr = await _run_with_progress(cmd, source_duration, asset_id, db_session_factory)
         else:
-            # Video transcodes can be very long — track progress via ffmpeg stdout
-            cmd = _video_transcode_cmd(raw_path, out_path, with_progress=True)
+            # Video transcodes can be very long — track progress via ffmpeg stdout.
+            # has_audio tells the command builder whether to generate silent audio.
+            cmd = _video_transcode_cmd(raw_path, out_path, with_progress=True, has_audio=has_audio)
             rc, stderr = await _run_with_progress(cmd, source_duration, asset_id, db_session_factory)
 
         if rc != 0:
