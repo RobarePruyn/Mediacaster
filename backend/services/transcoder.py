@@ -35,12 +35,18 @@ VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".ts", ".m2ts", ".mxf",
                     ".flv", ".wmv", ".webm", ".mpg", ".mpeg", ".m4v"}
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp"}
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".aac", ".flac", ".ogg", ".opus", ".m4a", ".wma", ".aiff"}
-ALL_EXTENSIONS = VIDEO_EXTENSIONS | IMAGE_EXTENSIONS | AUDIO_EXTENSIONS
+# GIF is handled specially — animated GIFs are transcoded as video, static as image.
+# It's listed separately so classify_upload can defer to probe-time detection.
+GIF_EXTENSION = {".gif"}
+ALL_EXTENSIONS = VIDEO_EXTENSIONS | IMAGE_EXTENSIONS | AUDIO_EXTENSIONS | GIF_EXTENSION
 
 
 def classify_upload(filename: str) -> AssetType:
     """
     Determine the asset type from a filename's extension.
+
+    GIF files are initially classified as IMAGE. The transcode pipeline
+    re-classifies animated GIFs as VIDEO after probing (see _do_transcode).
 
     Args:
         filename: Original upload filename (e.g. "clip.mp4")
@@ -54,7 +60,7 @@ def classify_upload(filename: str) -> AssetType:
     ext = Path(filename).suffix.lower()
     if ext in VIDEO_EXTENSIONS:
         return AssetType.VIDEO
-    elif ext in IMAGE_EXTENSIONS:
+    elif ext in IMAGE_EXTENSIONS or ext in GIF_EXTENSION:
         return AssetType.IMAGE
     elif ext in AUDIO_EXTENSIONS:
         return AssetType.AUDIO
@@ -337,6 +343,37 @@ def _thumbnail_cmd(input_path: str, output_path: str, asset_type: AssetType) -> 
     return base
 
 
+async def _is_animated_gif(file_path: str) -> bool:
+    """Detect whether a GIF file contains multiple frames (animated).
+
+    Uses ffprobe to count the number of video frames. A static GIF has
+    exactly 1 frame; anything more is animated.
+
+    Args:
+        file_path: Path to the GIF file.
+
+    Returns:
+        True if the GIF is animated (more than 1 frame), False otherwise.
+    """
+    cmd = [
+        config.FFPROBE_PATH, "-v", "quiet",
+        "-count_frames",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=nb_read_frames",
+        "-print_format", "json",
+        file_path,
+    ]
+    rc, stdout, _ = await _run_command(cmd)
+    if rc != 0:
+        return False
+    try:
+        data = json.loads(stdout)
+        frames = int(data["streams"][0]["nb_read_frames"])
+        return frames > 1
+    except (json.JSONDecodeError, KeyError, IndexError, ValueError):
+        return False
+
+
 async def probe_media(file_path: str) -> dict:
     """
     Run ffprobe to extract media metadata (duration, resolution, codec info).
@@ -432,6 +469,20 @@ async def _do_transcode(asset_id: int, db_session_factory) -> None:
         db.commit()
 
         raw_path = str(config.UPLOAD_DIR / asset.original_filename)
+
+        # GIF handling: probe to determine if animated or static.
+        # Animated GIFs are reclassified as VIDEO so they go through the video
+        # transcode pipeline (preserving motion). Static GIFs stay as IMAGE
+        # and get converted to a timed video clip like any other image.
+        if Path(raw_path).suffix.lower() == ".gif":
+            animated = await _is_animated_gif(raw_path)
+            if animated:
+                logger.info("Asset %d is an animated GIF — treating as video", asset_id)
+                asset.asset_type = AssetType.VIDEO
+                db.commit()
+            else:
+                logger.info("Asset %d is a static GIF — treating as image", asset_id)
+
         is_image = (asset.asset_type == AssetType.IMAGE)
         is_audio = (asset.asset_type == AssetType.AUDIO)
 
