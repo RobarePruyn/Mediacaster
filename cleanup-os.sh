@@ -227,19 +227,25 @@ dnf remove -y \
     2>/dev/null || true
 
 # ---------------------------------------------------------------------------
-# 5. Clean up orphaned dependencies
+# 5. Protect application dependencies from autoremove
+# ---------------------------------------------------------------------------
+echo ">>> Marking application dependencies as user-installed..."
+dnf mark install postgresql-server postgresql python3 podman nginx 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
+# 6. Clean up orphaned dependencies
 # ---------------------------------------------------------------------------
 echo ">>> Removing orphaned dependencies..."
 dnf autoremove -y
 
 # ---------------------------------------------------------------------------
-# 6. Clean dnf cache
+# 7. Clean dnf cache
 # ---------------------------------------------------------------------------
 echo ">>> Cleaning dnf cache..."
 dnf clean all
 
 # ---------------------------------------------------------------------------
-# 7. Summary
+# 8. Summary
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Cleanup Complete ==="
