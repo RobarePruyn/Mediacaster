@@ -55,7 +55,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ---------------------------------------------------------------------------
 # Step 1: Repositories
 # ---------------------------------------------------------------------------
-log_step "Step 1/9: Enabling repositories"
+log_step "Step 1/10: Enabling repositories"
 
 # EPEL (Extra Packages for Enterprise Linux) provides packages not in the
 # base RHEL repos, including x11vnc, xdotool, and other dependencies
@@ -83,7 +83,7 @@ dnf install -y \
 # ---------------------------------------------------------------------------
 # Step 2: System packages
 # ---------------------------------------------------------------------------
-log_step "Step 2/9: Installing system packages"
+log_step "Step 2/10: Installing system packages"
 
 log_info "Installing core packages (ffmpeg, Python, PostgreSQL, nginx)..."
 dnf install -y \
@@ -152,7 +152,7 @@ fi
 # ---------------------------------------------------------------------------
 # Step 3: Node.js (for building the React frontend)
 # ---------------------------------------------------------------------------
-log_step "Step 3/9: Installing Node.js ${NODE_MAJOR_VERSION}"
+log_step "Step 3/10: Installing Node.js ${NODE_MAJOR_VERSION}"
 
 if ! command -v node &>/dev/null; then
     # NodeSource provides up-to-date Node.js packages for RHEL-based distros.
@@ -165,7 +165,7 @@ log_info "Node: $(node --version)  npm: $(npm --version)"
 # ---------------------------------------------------------------------------
 # Step 4: Application user and directories
 # ---------------------------------------------------------------------------
-log_step "Step 4/9: Creating user and directories"
+log_step "Step 4/10: Creating user and directories"
 
 # Create a dedicated system user with no login shell — the app runs as this
 # user via systemd, and it should never be used for interactive login
@@ -202,7 +202,7 @@ mkdir -p "${APP_DIR}"/{media,uploads,thumbnails,playlists}
 # ---------------------------------------------------------------------------
 # Step 5: Deploy application files
 # ---------------------------------------------------------------------------
-log_step "Step 5/9: Deploying application"
+log_step "Step 5/10: Deploying application"
 
 cp -r "${SCRIPT_DIR}/backend" "${APP_DIR}/"
 cp "${SCRIPT_DIR}/requirements.txt" "${APP_DIR}/"
@@ -225,7 +225,7 @@ cp -r "${SCRIPT_DIR}/container" "${APP_DIR}/"
 # ---------------------------------------------------------------------------
 # Step 6: Build frontend and container image
 # ---------------------------------------------------------------------------
-log_step "Step 6/9: Building React frontend and browser source container"
+log_step "Step 6/10: Building React frontend and browser source container"
 
 cd "${APP_DIR}/frontend"
 # --include=dev ensures devDependencies (Vite, build tooling) are
@@ -264,7 +264,7 @@ chmod 440 /etc/sudoers.d/mcs-podman
 # ---------------------------------------------------------------------------
 # Step 7: Permissions
 # ---------------------------------------------------------------------------
-log_step "Step 7/9: Setting ownership and permissions"
+log_step "Step 7/10: Setting ownership and permissions"
 
 chown -R "${APP_USER}:${APP_GROUP}" "${APP_DIR}"
 chmod -R 755 "${APP_DIR}"
@@ -274,7 +274,7 @@ chmod 775 "${APP_DIR}"/{media,uploads,thumbnails,playlists}
 # ---------------------------------------------------------------------------
 # Step 8: Systemd + nginx
 # ---------------------------------------------------------------------------
-log_step "Step 8/9: Configuring services"
+log_step "Step 8/10: Configuring services"
 
 cp "${SCRIPT_DIR}/systemd/multicast-streamer.service" /etc/systemd/system/
 
@@ -327,7 +327,7 @@ systemctl enable nginx
 # ---------------------------------------------------------------------------
 # Step 9: Firewall + SELinux + multicast routing
 # ---------------------------------------------------------------------------
-log_step "Step 9/9: Firewall, SELinux, and multicast routing"
+log_step "Step 9/10: Firewall, SELinux, and multicast routing"
 
 if systemctl is-active --quiet firewalld; then
     firewall-cmd --permanent --add-service=http
@@ -425,6 +425,154 @@ if systemctl is-active --quiet nginx; then
 else
     log_error "nginx failed — check: journalctl -u nginx -n 50"
 fi
+
+# ---------------------------------------------------------------------------
+# Step 10/10: OS cleanup — remove unnecessary packages and services
+# ---------------------------------------------------------------------------
+log_step "Step 10/10: OS cleanup — removing unnecessary packages and services"
+
+# Switch to text console — the GNOME desktop is not needed for a headless server
+systemctl set-default multi-user.target
+systemctl stop gdm.service 2>/dev/null || true
+systemctl disable gdm.service 2>/dev/null || true
+
+# Disable unnecessary services
+log_info "Disabling unnecessary services..."
+SERVICES_TO_DISABLE=(
+    cups.service cups.socket cups.path cups-browsed.service
+    bluetooth.service
+    ModemManager.service
+    cockpit.socket cockpit.service
+    sssd.service sssd-kcm.socket
+    at-spi-dbus-bus.service
+    avahi-daemon.service avahi-daemon.socket
+    abrt-journal-core.service abrt-oops.service abrt-xorg.service abrtd.service
+    pcscd.service pcscd.socket
+    gnome-remote-desktop.service
+    flatpak-system-helper.service
+    evolution-addressbook-factory.service evolution-calendar-factory.service evolution-source-registry.service
+    geoclue.service
+    power-profiles-daemon.service
+    switcheroo-control.service
+    bolt.service
+    low-memory-monitor.service
+    tracker-miner-fs-3.service
+    usbguard.service
+    iio-sensor-proxy.service
+    rtkit-daemon.service
+)
+for svc in "${SERVICES_TO_DISABLE[@]}"; do
+    if systemctl list-unit-files "$svc" &>/dev/null; then
+        systemctl stop "$svc" 2>/dev/null || true
+        systemctl disable "$svc" 2>/dev/null || true
+    fi
+done
+
+# Remove GNOME desktop environment
+log_info "Removing GNOME desktop environment..."
+dnf group remove -y "GNOME" 2>/dev/null || true
+dnf group remove -y "Graphical Administration Tools" 2>/dev/null || true
+
+# Remove printing, scanning, bluetooth
+log_info "Removing printing, bluetooth, and scanner packages..."
+dnf remove -y \
+    cups cups-libs cups-filters cups-browsed cups-client cups-ipptool \
+    cups-filesystem cups-pk-helper \
+    gutenprint* foomatic* ghostscript* hplip* \
+    sane-backends* libsane* colord colord-libs \
+    bluez bluez-libs bluez-obexd gnome-bluetooth gnome-bluetooth-libs \
+    2>/dev/null || true
+
+# Remove ModemManager, cockpit, SSSD, flatpak
+log_info "Removing ModemManager, cockpit, SSSD, flatpak..."
+dnf remove -y \
+    ModemManager ModemManager-glib \
+    cockpit cockpit-ws cockpit-bridge cockpit-system \
+    sssd sssd-client sssd-common sssd-kcm sssd-nfs-idmap \
+    sssd-ad sssd-ipa sssd-krb5 sssd-ldap sssd-proxy \
+    flatpak flatpak-libs flatpak-session-helper \
+    2>/dev/null || true
+
+# Remove accessibility
+log_info "Removing accessibility packages..."
+dnf remove -y \
+    orca at-spi2-core at-spi2-atk \
+    brltty speech-dispatcher speech-dispatcher-espeak-ng espeak-ng \
+    2>/dev/null || true
+
+# Remove unnecessary fonts (keep dejavu for basic rendering)
+log_info "Removing unnecessary fonts..."
+dnf remove -y \
+    google-noto-cjk* google-noto-sans-cjk* google-noto-serif-cjk* \
+    google-noto-sans-mono-cjk* \
+    google-noto-sans-ethiopic* google-noto-sans-lisu* \
+    google-noto-sans-math* google-noto-sans-gurmukhi* \
+    google-noto-sans-sinhala* google-noto-sans-thai* \
+    google-noto-sans-tamil* google-noto-sans-telugu* \
+    google-noto-sans-kannada* google-noto-sans-bengali* \
+    google-noto-sans-devanagari* google-noto-sans-gujarati* \
+    google-noto-sans-malayalam* google-noto-sans-oriya* \
+    google-noto-sans-tibetan* google-noto-sans-khmer* \
+    google-noto-sans-lao* google-noto-sans-myanmar* \
+    google-noto-sans-georgian* google-noto-sans-armenian* \
+    google-noto-sans-hebrew* google-noto-sans-arabic* \
+    google-noto-emoji* google-noto-color-emoji* \
+    jomolhari-fonts sil-padauk-fonts khmer-os-system-fonts \
+    lohit-* paktype-* smc-* thai-scalable-* \
+    abattis-cantarell-fonts adobe-source-code-pro-fonts \
+    2>/dev/null || true
+
+# Remove GNOME apps, Wayland/X11, ABRT, and misc desktop packages
+log_info "Removing GNOME applications and desktop components..."
+dnf remove -y \
+    gnome-shell gnome-session gnome-session-wayland-session \
+    gnome-settings-daemon gnome-control-center \
+    gnome-terminal gnome-text-editor gnome-calculator \
+    gnome-characters gnome-clocks gnome-color-manager \
+    gnome-connections gnome-console gnome-contacts \
+    gnome-disk-utility gnome-font-viewer gnome-logs \
+    gnome-maps gnome-photos gnome-remote-desktop \
+    gnome-screenshot gnome-shell-extension-* \
+    gnome-software gnome-system-monitor gnome-tour \
+    gnome-user-docs gnome-weather gnome-tweaks \
+    gnome-boxes gnome-calendar gnome-menus \
+    gnome-online-accounts gnome-initial-setup \
+    gnome-keyring gnome-classic-session \
+    gdm mutter \
+    nautilus nautilus-extensions \
+    evince evince-libs totem totem-pl-parser \
+    eog cheese baobab file-roller loupe \
+    gedit rhythmbox shotwell simple-scan \
+    yelp yelp-libs yelp-xsl \
+    evolution evolution-data-server \
+    tracker tracker-miners \
+    gjs libgjs \
+    xorg-x11-server-Xwayland xwayland-run \
+    abrt* libreport* \
+    geoclue2 geoclue2-libs bolt switcheroo-control \
+    iio-sensor-proxy low-memory-monitor power-profiles-daemon \
+    pcscd pcsc-lite pcsc-lite-libs usbguard realmd adcli \
+    ibus ibus-gtk3 ibus-gtk4 ibus-libzhuyin ibus-typing-booster \
+    libpinyin malcontent malcontent-libs \
+    2>/dev/null || true
+
+# Remove build tools — all pip dependencies use pre-built wheels
+log_info "Removing build tools (not needed — pip deps are pre-built wheels)..."
+dnf remove -y \
+    gcc gcc-c++ cpp make \
+    kernel-headers kernel-devel \
+    glibc-devel glibc-headers \
+    libstdc++-devel \
+    binutils \
+    2>/dev/null || true
+
+# Protect application dependencies from autoremove, then clean up orphans
+log_info "Cleaning up orphaned dependencies..."
+dnf mark install postgresql-server postgresql python3 podman nginx 2>/dev/null || true
+dnf autoremove -y
+dnf clean all
+
+log_info "OS cleanup complete — $(rpm -qa | wc -l) packages remaining"
 
 # ---------------------------------------------------------------------------
 # Summary
