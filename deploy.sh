@@ -568,7 +568,7 @@ dnf remove -y \
 
 # Protect application dependencies from autoremove, then clean up orphans
 log_info "Cleaning up orphaned dependencies..."
-dnf mark install postgresql-server postgresql python3 podman nginx 2>/dev/null || true
+dnf mark install postgresql-server postgresql python3 podman nginx ffmpeg nodejs 2>/dev/null || true
 dnf autoremove -y
 dnf clean all
 

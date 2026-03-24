@@ -230,7 +230,7 @@ dnf remove -y \
 # 5. Protect application dependencies from autoremove
 # ---------------------------------------------------------------------------
 echo ">>> Marking application dependencies as user-installed..."
-dnf mark install postgresql-server postgresql python3 podman nginx 2>/dev/null || true
+dnf mark install postgresql-server postgresql python3 podman nginx ffmpeg nodejs 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
 # 6. Clean up orphaned dependencies
