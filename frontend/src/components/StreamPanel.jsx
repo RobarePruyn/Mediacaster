@@ -200,14 +200,13 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
 
   /**
    * Constructs the noVNC URL for the browser source preview iframe.
-   * Connects directly to the websockify port on the server (not proxied through nginx,
-   * because the nginx regex proxy for variable ports is unreliable — see CLAUDE.md).
+   * Proxied through nginx at /novnc/<port>/ so it stays on the same origin and
+   * protocol (HTTPS), avoiding mixed-content blocks in the browser.
    * Query params configure auto-connect, viewport scaling, auto-reconnect, and cursor dot.
    */
   const novncPort = currentStream?.browser_source?.novnc_port;
-  const serverHost = window.location.hostname;
   const novncUrl = (novncPort && isRunning)
-    ? `http://${serverHost}:${novncPort}/vnc_embed.html?autoconnect=true&reconnect=true&show_dot=true`
+    ? `${window.location.origin}/novnc/${novncPort}/vnc_embed.html?autoconnect=true&reconnect=true&show_dot=true`
     : null;
 
   if (isLoading) {
