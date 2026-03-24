@@ -306,6 +306,26 @@ fi
 systemctl daemon-reload
 systemctl enable multicast-streamer
 
+# Generate a self-signed TLS certificate if one doesn't exist.
+# This provides HTTPS out of the box — replace with real certs for production.
+# The cert is valid for 10 years with a SAN covering the server's IP and hostname.
+CERT_FILE="/etc/pki/tls/certs/mediacaster.crt"
+KEY_FILE="/etc/pki/tls/private/mediacaster.key"
+if [[ ! -f "${CERT_FILE}" ]]; then
+    log_info "Generating self-signed TLS certificate..."
+    CERT_IP=$(hostname -I | awk '{print $1}')
+    CERT_HOSTNAME=$(hostname -f 2>/dev/null || hostname)
+    openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+        -keyout "${KEY_FILE}" \
+        -out "${CERT_FILE}" \
+        -subj "/CN=Mediacaster/O=Mediacaster" \
+        -addext "subjectAltName=IP:${CERT_IP},DNS:${CERT_HOSTNAME},DNS:localhost"
+    chmod 600 "${KEY_FILE}"
+    log_info "Self-signed cert generated for ${CERT_IP} / ${CERT_HOSTNAME}"
+else
+    log_info "TLS certificate already exists — preserving"
+fi
+
 # Remove the default nginx welcome page config — it would conflict with
 # our server block (both listen on port 80 with server_name _)
 rm -f /etc/nginx/conf.d/default.conf
