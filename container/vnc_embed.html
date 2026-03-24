@@ -94,11 +94,17 @@
         }
 
         // ── Build the WebSocket URL ─────────────────────────────────────
-        // The iframe is loaded from http://host:novnc_port/vnc_embed.html
-        // so the WebSocket connects back to the same host:port via ws://
+        // When proxied through nginx (/novnc/<port>/vnc_embed.html), the
+        // websocket must use the same path prefix so nginx routes it to
+        // the correct websockify port. When loaded directly (http://host:port/),
+        // use the simple /websockify path.
         const wsScheme = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
         const wsPath = params.get('path') || 'websockify';
-        const wsUrl = `${wsScheme}${window.location.host}/${wsPath}`;
+        // Detect if we're being served through the nginx /novnc/<port>/ proxy
+        // by checking the URL path prefix
+        const pathMatch = window.location.pathname.match(/^\/novnc\/(\d+)\//);
+        const basePath = pathMatch ? `/novnc/${pathMatch[1]}` : '';
+        const wsUrl = `${wsScheme}${window.location.host}${basePath}/${wsPath}`;
 
         // ── Connect to VNC ──────────────────────────────────────────────
         let rfb = null;
