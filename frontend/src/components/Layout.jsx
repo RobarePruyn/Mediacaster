@@ -15,7 +15,7 @@ import AssetLibrary from './AssetLibrary';
 import StreamPanel from './StreamPanel';
 import Settings from './Settings';
 import Monitoring from './Monitoring';
-import { listAssets, listStreams, getStorageInfo } from '../api';
+import { listAssets, listStreams, getStorageInfo, listPresentations } from '../api';
 
 export default function Layout({ currentUser, onLogout }) {
   const isAdmin = currentUser?.is_admin;
@@ -29,6 +29,8 @@ export default function Layout({ currentUser, onLogout }) {
   const [loadingStreams, setLoadingStreams] = useState(true);
   /** Storage usage info (usable_gb, usage_percent, etc.) for the storage bar in AssetLibrary */
   const [storage, setStorage] = useState(null);
+  /** Uploaded presentations (for the Presentations section in AssetLibrary) */
+  const [presentations, setPresentations] = useState([]);
 
   /** Fetches the asset list. Called on mount and after uploads/deletes/renames. */
   const refreshAssets = useCallback(async () => {
@@ -56,8 +58,14 @@ export default function Layout({ currentUser, onLogout }) {
     try { setStorage(await getStorageInfo()); } catch {}
   }, []);
 
+  /** Fetches presentations for the Presentations section in AssetLibrary. */
+  const refreshPresentations = useCallback(async () => {
+    try { const d = await listPresentations(); setPresentations(d.presentations || []); }
+    catch (e) { console.error('Failed to load presentations:', e); }
+  }, []);
+
   // Initial data load on mount
-  useEffect(() => { refreshAssets(); refreshStreams(); refreshStorage(); }, [refreshAssets, refreshStreams, refreshStorage]);
+  useEffect(() => { refreshAssets(); refreshStreams(); refreshStorage(); refreshPresentations(); }, [refreshAssets, refreshStreams, refreshStorage, refreshPresentations]);
 
   /**
    * Polling interval for transcode progress.
@@ -71,6 +79,14 @@ export default function Layout({ currentUser, onLogout }) {
     const interval = setInterval(refreshAssets, 2000);
     return () => clearInterval(interval);
   }, [assets, refreshAssets]);
+
+  /** Poll presentation status while any are still converting. */
+  useEffect(() => {
+    const converting = presentations.some(p => p.status === 'uploading' || p.status === 'processing');
+    if (!converting) return;
+    const interval = setInterval(refreshPresentations, 2000);
+    return () => clearInterval(interval);
+  }, [presentations, refreshPresentations]);
 
   return (
     <div className="layout">
@@ -103,7 +119,8 @@ export default function Layout({ currentUser, onLogout }) {
           <section className="panel panel-library">
             <AssetLibrary assets={assets} isLoading={loadingAssets} onRefresh={() => { refreshAssets(); refreshStorage(); }}
               selectedStreamId={selectedStreamId} onRefreshStreams={refreshStreams}
-              storage={storage} isAdmin={isAdmin} />
+              storage={storage} isAdmin={isAdmin}
+              presentations={presentations} onRefreshPresentations={refreshPresentations} />
           </section>
           {/* Right panel: stream configuration, transport controls, playlist / browser config */}
           <section className="panel panel-streams">

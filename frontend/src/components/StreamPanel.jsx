@@ -26,7 +26,7 @@ import {
   createStream, updateStream, deleteStream, updateBrowserConfig,
   removePlaylistItem, reorderPlaylist,
   startStream, stopStream, restartStream, getStreamStatus,
-  listPresentations, navigateSlide, uploadPresentation, deletePresentation,
+  listPresentations, navigateSlide,
 } from '../api';
 
 export default function StreamPanel({ streams, selectedStreamId, onSelectStream, assets, isLoading, onRefresh, isAdmin }) {
@@ -59,8 +59,6 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
   const [selectedPresentationId, setSelectedPresentationId] = useState(null);
   /** Source mode: 'url' for manual URL, 'presentation' for linked presentation */
   const [browserSourceMode, setBrowserSourceMode] = useState('url');
-  /** Upload progress for presentation file (0-100, null when not uploading) */
-  const [presUploadProgress, setPresUploadProgress] = useState(null);
 
   /** The currently selected stream object (derived from the streams array) */
   const currentStream = streams.find(s => s.id === selectedStreamId);
@@ -385,34 +383,11 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
                           {presentations.filter(p => p.status === 'processing').length} presentation(s) still converting...
                         </span>
                       )}
-                      {/* Upload new presentation inline */}
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
-                        <label className="btn btn-sm btn-accent" style={{ cursor: 'pointer' }}>
-                          Upload New
-                          <input type="file" accept=".pptx,.ppt,.odp,.pdf" style={{ display: 'none' }}
-                            onChange={async (e) => {
-                              const file = e.target.files?.[0];
-                              if (!file) return;
-                              try {
-                                setPresUploadProgress(0);
-                                await uploadPresentation(file, setPresUploadProgress);
-                                setPresUploadProgress(null);
-                                // Refresh presentations list after upload
-                                const data = await listPresentations();
-                                setPresentations(data.presentations || []);
-                              } catch (err) {
-                                setPresUploadProgress(null);
-                                setErrorMsg(err.message);
-                              }
-                              e.target.value = '';
-                            }} />
-                        </label>
-                        {presUploadProgress !== null && (
-                          <span className="mono" style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
-                            {presUploadProgress}%
-                          </span>
-                        )}
-                      </div>
+                      {presentations.filter(p => p.status === 'ready').length === 0 && (
+                        <span style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+                          Upload a presentation in the Media Library first.
+                        </span>
+                      )}
                     </div>
                   </div>
                 )}

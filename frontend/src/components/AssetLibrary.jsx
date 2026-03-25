@@ -24,7 +24,7 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   uploadAsset, deleteAsset, renameAsset, addPlaylistItem, listAssets,
   getFolderTree, createFolder, updateFolder, deleteFolder,
-  updateFolderSharing, moveAssets, uploadPresentation,
+  updateFolderSharing, moveAssets, uploadPresentation, deletePresentation,
 } from '../api';
 
 /* ── Utility functions ───────────────────────────────────────────────────── */
@@ -102,7 +102,8 @@ function FolderTreeNode({ folder, selectedFolderId, onSelect, depth = 0, isAdmin
 /* ── Main component ──────────────────────────────────────────────────────── */
 
 export default function AssetLibrary({ assets, isLoading, onRefresh, selectedStreamId,
-                                        onRefreshStreams, storage, isAdmin }) {
+                                        onRefreshStreams, storage, isAdmin,
+                                        presentations = [], onRefreshPresentations }) {
   // Upload state
   const [uploadProgress, setUploadProgress] = useState(null);
   const [uploadError, setUploadError] = useState('');
@@ -111,6 +112,7 @@ export default function AssetLibrary({ assets, isLoading, onRefresh, selectedStr
 
   // Asset interaction state
   const [deleteConfirmId, setDeleteConfirmId] = useState(null);
+  const [presDeleteConfirmId, setPresDeleteConfirmId] = useState(null);
   const [renamingId, setRenamingId] = useState(null);
   const [renameValue, setRenameValue] = useState('');
   const [moveAssetId, setMoveAssetId] = useState(null);
@@ -213,7 +215,7 @@ export default function AssetLibrary({ assets, isLoading, onRefresh, selectedStr
           // Presentation files are converted to slide images, not transcoded as media
           await uploadPresentation(file, (pct) => setUploadProgress(pct));
           setUploadProgress(null);
-          setUploadError('Presentation uploaded — select it in a Browser Source stream to use it.');
+          if (onRefreshPresentations) onRefreshPresentations();
         } else {
           const newAsset = await uploadAsset(file, (pct) => setUploadProgress(pct));
           setUploadProgress(null);
@@ -564,7 +566,7 @@ export default function AssetLibrary({ assets, isLoading, onRefresh, selectedStr
           onDragOver={(e) => { e.preventDefault(); setIsDragOver(true); }}
           onDragLeave={() => setIsDragOver(false)}
           onClick={() => fileInputRef.current?.click()}>
-          <input ref={fileInputRef} type="file" accept="video/*,image/*,audio/*" multiple
+          <input ref={fileInputRef} type="file" accept="video/*,image/*,audio/*,.pptx,.ppt,.odp,.pdf" multiple
             onChange={onFileSelect} style={{ display: 'none' }} />
           {uploadProgress !== null ? (
             <div className="upload-progress">
@@ -576,7 +578,7 @@ export default function AssetLibrary({ assets, isLoading, onRefresh, selectedStr
           ) : (<>
             <span className="upload-icon">⬆</span>
             <span className="upload-text">Drop files here or click to browse</span>
-            <span className="upload-hint">Video: mp4, mov, avi, mkv, ts — Image: jpg, png, webp — Audio: mp3, wav, flac, aac, ogg</span>
+            <span className="upload-hint">Video: mp4, mov, avi, mkv, ts — Image: jpg, png, webp — Audio: mp3, wav, flac, aac, ogg — Slides: pptx, odp, pdf</span>
           </>)}
         </div>
 
@@ -695,6 +697,62 @@ export default function AssetLibrary({ assets, isLoading, onRefresh, selectedStr
                 </div>
               );
             })}
+          </div>
+        )}
+
+        {/* ── Presentations section ──────────────────────────────────────────── */}
+        {presentations.length > 0 && (
+          <div className="presentations-section">
+            <h3 className="presentations-header">Presentations ({presentations.length})</h3>
+            <div className="presentations-list">
+              {presentations.map(pres => {
+                const statusBadge = {
+                  uploading:  { cls: 'badge-info',    label: 'Uploading' },
+                  processing: { cls: 'badge-warning', label: 'Converting' },
+                  ready:      { cls: 'badge-success', label: 'Ready' },
+                  error:      { cls: 'badge-error',   label: 'Error' },
+                }[pres.status] || { cls: 'badge-error', label: pres.status };
+                return (
+                  <div key={pres.id} className="presentation-card">
+                    <div className="presentation-icon">📊</div>
+                    <div className="presentation-info">
+                      <span className="presentation-name">{pres.name}</span>
+                      <div className="presentation-meta">
+                        <span className={`badge badge-sm ${statusBadge.cls}`}>{statusBadge.label}</span>
+                        {pres.status === 'ready' && (
+                          <span className="mono">{pres.slide_count} slide{pres.slide_count !== 1 ? 's' : ''}</span>
+                        )}
+                        {pres.status === 'processing' && (
+                          <div className="transcode-progress" style={{ flex: 1 }}>
+                            <div className="transcode-progress-bar">
+                              <div className="transcode-progress-fill pres-converting" />
+                            </div>
+                            <span className="processing-text mono">Converting...</span>
+                          </div>
+                        )}
+                        {pres.status === 'error' && (
+                          <span className="error-text" title={pres.error_message}>Conversion failed</span>
+                        )}
+                      </div>
+                    </div>
+                    <div className="presentation-actions">
+                      {presDeleteConfirmId === pres.id ? (
+                        <div className="delete-confirm">
+                          <button className="btn btn-sm btn-danger" onClick={async () => {
+                            try { await deletePresentation(pres.id); setPresDeleteConfirmId(null); if (onRefreshPresentations) onRefreshPresentations(); }
+                            catch (err) { console.error('Delete failed:', err); }
+                          }}>Confirm</button>
+                          <button className="btn btn-sm btn-ghost" onClick={() => setPresDeleteConfirmId(null)}>Cancel</button>
+                        </div>
+                      ) : (
+                        <button className="btn btn-sm btn-ghost btn-delete"
+                          onClick={() => setPresDeleteConfirmId(pres.id)} title="Delete">✕</button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           </div>
         )}
       </div>
