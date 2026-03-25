@@ -261,11 +261,12 @@ fi
 
 echo "[entrypoint] Starting ffmpeg capture → ${MULTICAST_URL}"
 
-# Calculate VBV buffer size at 2x the video bitrate. Extracts the numeric
-# portion (e.g., "8" from "8M") and doubles it. 2x gives the encoder enough
-# headroom to handle complexity spikes from x11grab without frame drops.
+# Calculate VBV buffer size at 1x the video bitrate. A smaller buffer forces
+# the encoder to react faster to scene complexity changes, preventing the
+# slow ramp-up that causes macroblocking during transitions. For live screen
+# capture, fast reaction is more important than buffer headroom.
 BITRATE_NUM="${VIDEO_BITRATE%%[^0-9]*}"
-BUFSIZE="$((BITRATE_NUM * 2))M"
+BUFSIZE="${BITRATE_NUM}M"
 
 # Build the ffmpeg command as an array for proper argument quoting.
 # The pipeline: x11grab input → libx264 encode → AAC audio → MPEG-TS mux → UDP output
@@ -329,12 +330,17 @@ fi
 
 FFMPEG_CMD+=(
     -b:v "${VIDEO_BITRATE}"
+    -minrate "${VIDEO_BITRATE}"
     -maxrate "${VIDEO_BITRATE}"
-    # bufsize controls the VBV buffer. 2x bitrate gives a 2-second buffer —
-    # more headroom for the encoder to handle scene complexity spikes from
-    # x11grab (page loads, video playback, animations) without dropping
-    # quality or frames. The original 1x was too tight for live capture.
+    # bufsize at 1x bitrate forces tight rate control — the encoder must
+    # maintain target bitrate consistently rather than slowly ramping up.
+    # This prevents the "undershoot on static, overshoot on complex" pattern
+    # that causes visible macroblocking during page transitions and scrolling.
     -bufsize "${BUFSIZE}"
+    # CBR NAL HRD mode pads the stream to maintain constant bitrate even
+    # during static scenes, keeping the VBV buffer full so the encoder has
+    # immediate headroom when complexity spikes.
+    -nal-hrd cbr
     # yuv420p is required for compatibility — many decoders reject yuv444p
     -pix_fmt yuv420p
     # GOP size = frame rate → keyframe every 1 second for fast IPTV channel tune-in.
