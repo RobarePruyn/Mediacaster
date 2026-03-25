@@ -64,8 +64,8 @@ STATIC_IMAGE_DURATION = int(os.getenv("MCS_IMAGE_DURATION", "10"))
 # has different tradeoffs: we can't use slow presets (CPU-bound in real time)
 # but we can afford higher bitrate since it's one stream at a time.
 # Priority order: quality > avoid macroblocking > minimize latency.
-BROWSER_SOURCE_VIDEO_BITRATE = os.getenv("MCS_BROWSER_VIDEO_BITRATE", "15M")
-BROWSER_SOURCE_VIDEO_PRESET = os.getenv("MCS_BROWSER_VIDEO_PRESET", "veryfast")
+BROWSER_SOURCE_VIDEO_BITRATE = os.getenv("MCS_BROWSER_VIDEO_BITRATE", "20M")
+BROWSER_SOURCE_VIDEO_PRESET = os.getenv("MCS_BROWSER_VIDEO_PRESET", "ultrafast")
 # Empty string = no tune flag. "zerolatency" saves ~200ms but disables B-frames
 # and lookahead, significantly hurting quality. "film" or "stillimage" can help
 # for specific content types.
