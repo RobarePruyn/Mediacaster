@@ -200,10 +200,10 @@ export async function getStream(id) { return apiFetch(`/streams/${id}`); }
 /** Updates stream configuration (name, multicast address/port, playback mode). Admin-only. */
 export async function updateStream(id, data) { return apiFetch(`/streams/${id}`, { method: 'PUT', body: JSON.stringify(data) }); }
 export async function deleteStream(id) { return apiFetch(`/streams/${id}`, { method: 'DELETE' }); }
-/** Updates the browser source configuration (URL and audio capture toggle) for a browser-type stream. */
-export async function updateBrowserConfig(streamId, url, captureAudio) {
+/** Updates the browser source configuration (URL, audio capture, optional presentation link). */
+export async function updateBrowserConfig(streamId, url, captureAudio, presentationId = null) {
   return apiFetch(`/streams/${streamId}/browser`, {
-    method: 'PUT', body: JSON.stringify({ url, capture_audio: captureAudio }),
+    method: 'PUT', body: JSON.stringify({ url, capture_audio: captureAudio, presentation_id: presentationId }),
   });
 }
 
@@ -307,3 +307,43 @@ export async function moveAssets(assetIds, folderId = null) {
 
 /** Fetches system resource metrics: CPU, RAM, network, per-stream breakdown, capacity estimates. */
 export async function getMonitoring() { return apiFetch('/monitoring'); }
+
+// ─── Presentations ────────────────────────────────────────────────────────────
+
+/**
+ * Uploads a presentation file (PPTX, ODP, PDF) using XHR for progress tracking.
+ * After upload, the backend converts slides to PNGs via LibreOffice headless.
+ */
+export async function uploadPresentation(file, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const formData = new FormData();
+    formData.append('file', file);
+    if (onProgress) {
+      xhr.upload.addEventListener('progress', (e) => {
+        if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100));
+      });
+    }
+    xhr.addEventListener('load', () => {
+      if (xhr.status === 201) resolve(JSON.parse(xhr.responseText));
+      else { try { reject(new Error(JSON.parse(xhr.responseText).detail)); } catch { reject(new Error(`Upload failed: ${xhr.status}`)); } }
+    });
+    xhr.addEventListener('error', () => reject(new Error('Network error')));
+    const token = getStoredToken();
+    xhr.open('POST', `${API_BASE}/presentations/upload`);
+    if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+    xhr.send(formData);
+  });
+}
+/** Lists all presentations visible to the current user. */
+export async function listPresentations() { return apiFetch('/presentations/'); }
+/** Gets a single presentation's details. */
+export async function getPresentation(id) { return apiFetch(`/presentations/${id}`); }
+/** Deletes a presentation and its slide files. */
+export async function deletePresentation(id) { return apiFetch(`/presentations/${id}`, { method: 'DELETE' }); }
+/** Navigates to a specific slide (1-indexed). */
+export async function navigateSlide(presentationId, slide) {
+  return apiFetch(`/presentations/${presentationId}/navigate`, {
+    method: 'POST', body: JSON.stringify({ slide }),
+  });
+}

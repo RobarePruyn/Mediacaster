@@ -72,6 +72,14 @@ class StreamSourceType(str, enum.Enum):
     BROWSER = "browser"    # Virtual Firefox instance captured via x11grab
 
 
+class PresentationStatus(str, enum.Enum):
+    """Lifecycle states for an uploaded presentation."""
+    UPLOADING = "uploading"    # File received, not yet converted
+    PROCESSING = "processing"  # LibreOffice conversion in progress
+    READY = "ready"            # Slides extracted and available
+    ERROR = "error"            # Conversion failed — see error_message
+
+
 class FolderShareMode(str, enum.Enum):
     """Access level when a folder is shared with non-owner users."""
     READ_ONLY = "read_only"    # Can view/use assets but not add/remove/rename
@@ -270,6 +278,38 @@ class StreamItem(Base):
     asset = relationship("Asset", back_populates="stream_items")
 
 
+class Presentation(Base):
+    """
+    An uploaded slideshow file (PPTX, ODP, PDF) converted to per-slide PNG images.
+
+    LibreOffice headless converts the upload into individual slide images stored
+    in a dedicated directory. The current_slide field tracks which slide is being
+    displayed — the slide viewer HTML page polls this value and the frontend
+    control panel updates it via the navigate API.
+
+    Presentations are linked to browser sources via BrowserSource.presentation_id.
+    The browser source container loads the slide viewer URL, which displays the
+    current slide as a full-screen image.
+    """
+    __tablename__ = "presentations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(512), nullable=False)
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    slide_count = Column(Integer, default=0)
+    current_slide = Column(Integer, default=1)  # 1-indexed
+    slides_dir = Column(String(1024), nullable=True)  # Path to directory of slide PNGs
+    status = Column(SAEnum(PresentationStatus), default=PresentationStatus.UPLOADING)
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.datetime.utcnow,
+                        onupdate=datetime.datetime.utcnow)
+
+    # Relationships
+    owner = relationship("User")
+    browser_sources = relationship("BrowserSource", back_populates="presentation")
+
+
 class BrowserSource(Base):
     """
     Configuration for a virtual browser capture source.
@@ -277,6 +317,10 @@ class BrowserSource(Base):
     When a stream's source_type is BROWSER, this record stores the URL to
     load in Firefox and the allocated display/port numbers for the Podman
     container's Xvfb, VNC, and noVNC services.
+
+    Optionally links to a Presentation — when presentation_id is set, the URL
+    is auto-generated to point at the slide viewer page, and the frontend shows
+    a slide navigation control panel instead of the manual URL input.
 
     One-to-one with Stream (unique constraint on stream_id).
     """
@@ -290,9 +334,12 @@ class BrowserSource(Base):
     display_number = Column(Integer, nullable=True)       # Xvfb display :N inside the container
     vnc_port = Column(Integer, nullable=True)             # x11vnc port (5950-6050 range)
     novnc_port = Column(Integer, nullable=True)           # noVNC websocket proxy port (6080-6180 range)
+    presentation_id = Column(Integer, ForeignKey("presentations.id", ondelete="SET NULL"),
+                             nullable=True)
 
-    # Relationship
+    # Relationships
     stream = relationship("Stream", back_populates="browser_source")
+    presentation = relationship("Presentation", back_populates="browser_sources")
 
 
 class UserStreamAssignment(Base):

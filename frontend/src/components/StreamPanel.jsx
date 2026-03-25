@@ -26,6 +26,7 @@ import {
   createStream, updateStream, deleteStream, updateBrowserConfig,
   removePlaylistItem, reorderPlaylist,
   startStream, stopStream, restartStream, getStreamStatus,
+  listPresentations, navigateSlide, uploadPresentation, deletePresentation,
 } from '../api';
 
 export default function StreamPanel({ streams, selectedStreamId, onSelectStream, assets, isLoading, onRefresh, isAdmin }) {
@@ -50,6 +51,16 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
   const [browserAudio, setBrowserAudio] = useState(false);
   /** Whether the browser source config section is in edit mode */
   const [editingBrowser, setEditingBrowser] = useState(false);
+
+  // --- Presentation / slide control state ---
+  /** Available presentations loaded from the API */
+  const [presentations, setPresentations] = useState([]);
+  /** Selected presentation ID in the browser source config form */
+  const [selectedPresentationId, setSelectedPresentationId] = useState(null);
+  /** Source mode: 'url' for manual URL, 'presentation' for linked presentation */
+  const [browserSourceMode, setBrowserSourceMode] = useState('url');
+  /** Upload progress for presentation file (0-100, null when not uploading) */
+  const [presUploadProgress, setPresUploadProgress] = useState(null);
 
   /** The currently selected stream object (derived from the streams array) */
   const currentStream = streams.find(s => s.id === selectedStreamId);
@@ -89,11 +100,23 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
       if (currentStream.browser_source) {
         setBrowserUrl(currentStream.browser_source.url || '');
         setBrowserAudio(currentStream.browser_source.capture_audio || false);
+        // Determine if this browser source is linked to a presentation
+        const presId = currentStream.browser_source.presentation_id;
+        setSelectedPresentationId(presId || null);
+        setBrowserSourceMode(presId ? 'presentation' : 'url');
       }
     }
     // Reset dirty flag when switching streams
     setPlaylistDirty(false);
   }, [selectedStreamId]);
+
+  /** Load available presentations when entering browser config edit mode */
+  useEffect(() => {
+    if (editingBrowser) {
+      listPresentations().then(data => setPresentations(data.presentations || []))
+        .catch(() => setPresentations([]));
+    }
+  }, [editingBrowser]);
 
   // ─── CRUD Operations ────────────────────────────────────────────────────────
 
@@ -125,11 +148,13 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
     } catch (e) { setErrorMsg(e.message); }
   };
 
-  /** Saves the browser source configuration (URL and audio capture toggle). */
+  /** Saves the browser source configuration (URL, audio capture, optional presentation link). */
   const handleSaveBrowser = async () => {
     if (!selectedStreamId) return; setErrorMsg('');
     try {
-      await updateBrowserConfig(selectedStreamId, browserUrl, browserAudio);
+      const presId = browserSourceMode === 'presentation' ? selectedPresentationId : null;
+      const url = browserSourceMode === 'presentation' ? 'about:blank' : browserUrl;
+      await updateBrowserConfig(selectedStreamId, url, browserAudio, presId);
       setEditingBrowser(false); onRefresh();
     } catch (e) { setErrorMsg(e.message); }
   };
@@ -327,11 +352,70 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
             </div>
             {editingBrowser ? (
               <div className="config-form">
+                {/* Source mode toggle: manual URL or presentation */}
                 <div className="form-row">
-                  <div className="form-group"><label>URL</label>
-                    <input type="text" value={browserUrl} onChange={e => setBrowserUrl(e.target.value)}
-                      placeholder="https://example.com" /></div>
+                  <div className="form-group"><label>Source Mode</label>
+                    <select value={browserSourceMode}
+                      onChange={e => setBrowserSourceMode(e.target.value)}>
+                      <option value="url">Manual URL</option>
+                      <option value="presentation">Presentation</option>
+                    </select>
+                  </div>
                 </div>
+                {browserSourceMode === 'url' ? (
+                  <div className="form-row">
+                    <div className="form-group"><label>URL</label>
+                      <input type="text" value={browserUrl} onChange={e => setBrowserUrl(e.target.value)}
+                        placeholder="https://example.com" /></div>
+                  </div>
+                ) : (
+                  <div className="form-row">
+                    <div className="form-group"><label>Presentation</label>
+                      <select value={selectedPresentationId || ''}
+                        onChange={e => setSelectedPresentationId(e.target.value ? Number(e.target.value) : null)}>
+                        <option value="">— Select a presentation —</option>
+                        {presentations.filter(p => p.status === 'ready').map(p => (
+                          <option key={p.id} value={p.id}>
+                            {p.name} ({p.slide_count} slides)
+                          </option>
+                        ))}
+                      </select>
+                      {presentations.filter(p => p.status === 'processing').length > 0 && (
+                        <span style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+                          {presentations.filter(p => p.status === 'processing').length} presentation(s) still converting...
+                        </span>
+                      )}
+                      {/* Upload new presentation inline */}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
+                        <label className="btn btn-sm btn-accent" style={{ cursor: 'pointer' }}>
+                          Upload New
+                          <input type="file" accept=".pptx,.ppt,.odp,.pdf" style={{ display: 'none' }}
+                            onChange={async (e) => {
+                              const file = e.target.files?.[0];
+                              if (!file) return;
+                              try {
+                                setPresUploadProgress(0);
+                                await uploadPresentation(file, setPresUploadProgress);
+                                setPresUploadProgress(null);
+                                // Refresh presentations list after upload
+                                const data = await listPresentations();
+                                setPresentations(data.presentations || []);
+                              } catch (err) {
+                                setPresUploadProgress(null);
+                                setErrorMsg(err.message);
+                              }
+                              e.target.value = '';
+                            }} />
+                        </label>
+                        {presUploadProgress !== null && (
+                          <span className="mono" style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+                            {presUploadProgress}%
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
                 <div className="form-row">
                   <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13,
                     color: 'var(--text-secondary)', padding: '4px 0' }}>
@@ -343,10 +427,17 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
               </div>
             ) : (
               <div className="config-display">
-                <div className="config-value"><span className="config-label">URL</span>
-                  <span className="mono" style={{ fontSize: 12, wordBreak: 'break-all' }}>
-                    {currentStream.browser_source?.url || 'Not configured'}
-                  </span></div>
+                {currentStream.remote_control ? (
+                  /* Presentation mode display */
+                  <div className="config-value"><span className="config-label">Presentation</span>
+                    <span>{currentStream.remote_control.presentation_name}
+                      ({currentStream.remote_control.total_slides} slides)</span></div>
+                ) : (
+                  <div className="config-value"><span className="config-label">URL</span>
+                    <span className="mono" style={{ fontSize: 12, wordBreak: 'break-all' }}>
+                      {currentStream.browser_source?.url || 'Not configured'}
+                    </span></div>
+                )}
                 <div className="config-value"><span className="config-label">Audio</span>
                   <span>{currentStream.browser_source?.capture_audio ? 'Capturing' : 'Disabled'}</span></div>
               </div>
@@ -368,6 +459,64 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
               className="novnc-frame"
               allow="clipboard-read; clipboard-write"
             />
+          </div>
+        )}
+
+        {/* ── Slide navigation controls (only when presentation is linked and stream is running) */}
+        {isBrowser && currentStream.remote_control && (
+          <div className="slide-controls">
+            <div className="config-header">
+              <h3>Slide Control — {currentStream.remote_control.presentation_name}</h3>
+            </div>
+            <div className="slide-nav">
+              <button className="btn btn-sm"
+                disabled={currentStream.remote_control.current_slide <= 1}
+                onClick={async () => {
+                  try {
+                    await navigateSlide(
+                      currentStream.remote_control.presentation_id,
+                      currentStream.remote_control.current_slide - 1
+                    );
+                    onRefresh();
+                  } catch (e) { setErrorMsg(e.message); }
+                }}>
+                ◀ Prev
+              </button>
+              <span className="slide-indicator mono">
+                Slide {currentStream.remote_control.current_slide} / {currentStream.remote_control.total_slides}
+              </span>
+              <button className="btn btn-sm"
+                disabled={currentStream.remote_control.current_slide >= currentStream.remote_control.total_slides}
+                onClick={async () => {
+                  try {
+                    await navigateSlide(
+                      currentStream.remote_control.presentation_id,
+                      currentStream.remote_control.current_slide + 1
+                    );
+                    onRefresh();
+                  } catch (e) { setErrorMsg(e.message); }
+                }}>
+                Next ▶
+              </button>
+            </div>
+            {/* Jump-to-slide input for quick access to any slide */}
+            <div className="slide-jump">
+              <label style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Go to slide:</label>
+              <input type="number" min="1" max={currentStream.remote_control.total_slides}
+                style={{ width: 60 }}
+                defaultValue={currentStream.remote_control.current_slide}
+                onKeyDown={async (e) => {
+                  if (e.key === 'Enter') {
+                    try {
+                      await navigateSlide(
+                        currentStream.remote_control.presentation_id,
+                        parseInt(e.target.value, 10)
+                      );
+                      onRefresh();
+                    } catch (err) { setErrorMsg(err.message); }
+                  }
+                }} />
+            </div>
           </div>
         )}
 

@@ -24,7 +24,7 @@ from alembic.config import Config as AlembicConfig
 from alembic import command as alembic_command
 from backend.config import CORS_ORIGINS, DEFAULT_ADMIN_USERNAME, DEFAULT_ADMIN_PASSWORD
 from backend.database import SessionLocal
-from backend.models import User, Asset, AssetStatus
+from backend.models import User, Asset, AssetStatus, Presentation, PresentationStatus
 from backend.auth import hash_password
 from backend.services.stream_manager import StreamManager
 from backend.services.browser_manager import BrowserManager
@@ -33,6 +33,7 @@ from backend.routes import assets as asset_routes
 from backend.routes import streams as stream_routes
 from backend.routes import settings as settings_routes
 from backend.routes import folders as folder_routes
+from backend.routes import presentations as presentation_routes
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
@@ -113,6 +114,15 @@ async def lifespan(app: FastAPI):
         if stale_count:
             db.commit()
             logger.info("Reset %d stale PROCESSING assets to ERROR", stale_count)
+
+        # Same treatment for presentations stuck mid-conversion
+        stale_pres = db.query(Presentation).filter(
+            Presentation.status == PresentationStatus.PROCESSING
+        ).update({Presentation.status: PresentationStatus.ERROR,
+                  Presentation.error_message: "Server restarted during conversion"})
+        if stale_pres:
+            db.commit()
+            logger.info("Reset %d stale PROCESSING presentations to ERROR", stale_pres)
     finally:
         db.close()
 
@@ -162,6 +172,7 @@ app.include_router(asset_routes.router)
 app.include_router(stream_routes.router)
 app.include_router(settings_routes.router)
 app.include_router(folder_routes.router)
+app.include_router(presentation_routes.router)
 
 # ── React SPA static file serving ────────────────────────────────────────────
 # In production, the React app is pre-built into frontend/dist/.

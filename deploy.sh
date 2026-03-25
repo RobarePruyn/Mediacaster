@@ -92,6 +92,35 @@ dnf install -y \
     postgresql-server postgresql \
     nginx gcc make git curl
 
+# LibreOffice is needed for presentation-to-slide conversion (headless mode).
+# On AL10+ it's not in the standard repos, so we install from the official RPM bundle.
+if ! command -v libreoffice &>/dev/null; then
+    log_info "Installing LibreOffice (presentation converter)..."
+    if dnf install -y libreoffice-impress 2>/dev/null; then
+        log_info "LibreOffice installed from system repos"
+    else
+        log_info "LibreOffice not in repos — installing from official RPM bundle..."
+        LO_VERSION="26.2.1"
+        LO_FILE="LibreOffice_${LO_VERSION}_Linux_x86-64_rpm.tar.gz"
+        LO_URL="https://download.documentfoundation.org/libreoffice/stable/${LO_VERSION}/rpm/x86_64/${LO_FILE}"
+        cd /tmp
+        curl -L -o "${LO_FILE}" "${LO_URL}"
+        tar xzf "${LO_FILE}"
+        cd LibreOffice_${LO_VERSION}*_rpm/RPMS/
+        dnf install -y ./*.rpm
+        # Create a stable symlink so the app can use /usr/bin/libreoffice
+        LO_BIN=$(ls /usr/bin/libreoffice* 2>/dev/null | head -1)
+        if [[ -n "${LO_BIN}" && "${LO_BIN}" != "/usr/bin/libreoffice" ]]; then
+            ln -sf "${LO_BIN}" /usr/bin/libreoffice
+        fi
+        rm -rf /tmp/LibreOffice_${LO_VERSION}* /tmp/${LO_FILE}
+        cd "${APP_DIR}"
+        log_info "LibreOffice installed from official bundle"
+    fi
+else
+    log_info "LibreOffice already installed: $(libreoffice --version 2>&1 | head -1)"
+fi
+
 # Podman runs browser source containers (containerized Firefox + capture stack).
 # We use Podman instead of Docker because it's the default container runtime
 # on RHEL/AlmaLinux and supports rootless operation.

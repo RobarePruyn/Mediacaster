@@ -59,6 +59,10 @@ TRANSCODE_AUDIO_SAMPLERATE = "48000"   # 48kHz — broadcast standard (not 44.1k
 # Images become a black video of this length with the image composited on top.
 STATIC_IMAGE_DURATION = int(os.getenv("MCS_IMAGE_DURATION", "10"))
 
+# ── Presentation conversion ──────────────────────────────────────────────
+PRESENTATIONS_DIR = BASE_DIR / "presentations"  # Per-presentation subdirectories of slide PNGs
+LIBREOFFICE_PATH = os.getenv("MCS_LIBREOFFICE_PATH", "/usr/bin/libreoffice")
+
 # ── Browser source live encoding profile ─────────────────────────────────
 # Separate from the offline transcode profile because live x11grab encoding
 # has different tradeoffs: we can't use slow presets (CPU-bound in real time)
@@ -132,5 +136,5 @@ FFPROBE_PATH = os.getenv("MCS_FFPROBE_PATH", "/usr/bin/ffprobe")
 # Create all required data directories at import time so the rest of the
 # application can assume they exist. parents=True handles nested paths,
 # exist_ok=True makes it idempotent.
-for _dir in [MEDIA_DIR, UPLOAD_DIR, THUMBNAIL_DIR, CONCAT_DIR]:
+for _dir in [MEDIA_DIR, UPLOAD_DIR, THUMBNAIL_DIR, CONCAT_DIR, PRESENTATIONS_DIR]:
     _dir.mkdir(parents=True, exist_ok=True)

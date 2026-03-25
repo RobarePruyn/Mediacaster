@@ -270,6 +270,7 @@ class BrowserSourceConfig(BaseModel):
     """Configuration for a browser source's target URL and audio capture."""
     url: str = Field(default="about:blank", max_length=2048)
     capture_audio: bool = False
+    presentation_id: Optional[int] = None  # Link to a presentation for slide viewer mode
 
 
 class BrowserSourceResponse(BaseModel):
@@ -284,6 +285,7 @@ class BrowserSourceResponse(BaseModel):
     display_number: Optional[int] = None  # Xvfb :N display number
     vnc_port: Optional[int] = None        # x11vnc port (for raw VNC clients)
     novnc_port: Optional[int] = None      # noVNC websocket port (for iframe preview)
+    presentation_id: Optional[int] = None
 
     class Config:
         from_attributes = True
@@ -316,6 +318,15 @@ class StreamItemResponse(BaseModel):
         from_attributes = True
 
 
+class RemoteControlInfo(BaseModel):
+    """Remote control state for a browser source linked to a presentation."""
+    type: str = "presentation"
+    presentation_id: int
+    current_slide: int
+    total_slides: int
+    presentation_name: str
+
+
 class StreamResponse(BaseModel):
     """
     Full representation of a multicast stream.
@@ -332,6 +343,7 @@ class StreamResponse(BaseModel):
     source_type: str = "playlist"  # "playlist" or "browser"
     items: List[StreamItemResponse] = []
     browser_source: Optional[BrowserSourceResponse] = None
+    remote_control: Optional[RemoteControlInfo] = None  # Present when browser source has a linked presentation
     assigned_user_ids: List[int] = []  # For RBAC display in the admin UI
     created_at: datetime
     updated_at: datetime
@@ -410,3 +422,32 @@ class SystemMonitorResponse(BaseModel):
     headroom_cpu_percent: float               # Remaining CPU before hitting limit
     headroom_memory_percent: float            # Remaining memory before hitting limit
     headroom_bandwidth_percent: float         # Remaining TX bandwidth before hitting limit
+
+
+# ── Presentations ────────────────────────────────────────────────────────
+
+class PresentationResponse(BaseModel):
+    """Full representation of an uploaded presentation."""
+    id: int
+    name: str
+    owner_id: Optional[int] = None
+    slide_count: int = 0
+    current_slide: int = 1
+    status: str
+    error_message: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class PresentationListResponse(BaseModel):
+    """List of presentations."""
+    presentations: List[PresentationResponse]
+    total_count: int
+
+
+class SlideNavigateRequest(BaseModel):
+    """Request to change the current slide."""
+    slide: int = Field(ge=1)  # 1-indexed target slide number

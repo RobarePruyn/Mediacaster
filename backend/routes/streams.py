@@ -33,7 +33,8 @@ from sqlalchemy.orm import Session
 from backend.database import get_db
 from backend.models import (
     Stream, StreamItem, StreamStatus, PlaybackMode, StreamSourceType,
-    Asset, AssetStatus, User, UserStreamAssignment, BrowserSource
+    Asset, AssetStatus, User, UserStreamAssignment, BrowserSource,
+    Presentation, PresentationStatus,
 )
 from backend.schemas import (
     StreamCreate, StreamUpdate, StreamResponse, StreamListResponse,
@@ -88,6 +89,7 @@ def _to_response(stream: Stream) -> dict:
 
     # Include browser source config if this is a BROWSER type stream
     browser_data = None
+    remote_control = None
     if stream.browser_source:
         bs = stream.browser_source
         browser_data = {
@@ -96,7 +98,20 @@ def _to_response(stream: Stream) -> dict:
             "display_number": bs.display_number,
             "vnc_port": bs.vnc_port,
             "novnc_port": bs.novnc_port,
+            "presentation_id": bs.presentation_id,
         }
+        # If the browser source is linked to a ready presentation, include
+        # remote control info so the frontend can show slide navigation controls
+        if bs.presentation_id and bs.presentation:
+            pres = bs.presentation
+            if pres.status == PresentationStatus.READY:
+                remote_control = {
+                    "type": "presentation",
+                    "presentation_id": pres.id,
+                    "current_slide": pres.current_slide or 1,
+                    "total_slides": pres.slide_count or 0,
+                    "presentation_name": pres.name,
+                }
 
     return {
         "id": stream.id, "name": stream.name,
@@ -107,6 +122,7 @@ def _to_response(stream: Stream) -> dict:
         "source_type": stream.source_type.value if stream.source_type else "playlist",
         "items": items,
         "browser_source": browser_data,
+        "remote_control": remote_control,
         "assigned_user_ids": [a.user_id for a in stream.assigned_users],
         "created_at": stream.created_at, "updated_at": stream.updated_at,
     }
@@ -283,13 +299,25 @@ def update_browser_config(stream_id: int, body: BrowserSourceConfig,
     stream = db.query(Stream).filter(Stream.id == stream_id).first()
     if not stream or stream.source_type != StreamSourceType.BROWSER:
         raise HTTPException(status_code=400, detail="Not a browser source stream")
+    # Determine the URL: if a presentation is linked, auto-generate the viewer URL
+    url = body.url
+    presentation_id = body.presentation_id
+    if presentation_id is not None:
+        pres = db.query(Presentation).filter(Presentation.id == presentation_id).first()
+        if not pres:
+            raise HTTPException(status_code=404, detail="Presentation not found")
+        # Override the URL to point at the slide viewer page
+        url = f"/api/presentations/{presentation_id}/viewer"
+
     if not stream.browser_source:
         # Lazy-create BrowserSource for streams that predate this feature
-        db.add(BrowserSource(stream_id=stream_id, url=body.url,
-                             capture_audio=body.capture_audio))
+        db.add(BrowserSource(stream_id=stream_id, url=url,
+                             capture_audio=body.capture_audio,
+                             presentation_id=presentation_id))
     else:
-        stream.browser_source.url = body.url
+        stream.browser_source.url = url
         stream.browser_source.capture_audio = body.capture_audio
+        stream.browser_source.presentation_id = presentation_id
     db.commit()
     db.refresh(stream)
     return _to_response(stream)
