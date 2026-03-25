@@ -44,7 +44,7 @@ DATABASE_URL = os.getenv(
 # seamless ffmpeg concat-demuxer switching between playlist items.
 TRANSCODE_VIDEO_CODEC = "libx264"
 TRANSCODE_VIDEO_PROFILE = "main"       # H.264 profile (main = broad compatibility)
-TRANSCODE_VIDEO_PRESET = "medium"      # Encoding speed vs compression tradeoff
+TRANSCODE_VIDEO_PRESET = "slow"        # Favor compression quality over encode speed (offline)
 TRANSCODE_VIDEO_BITRATE = "8M"         # Target bitrate for CBR-like output
 TRANSCODE_VIDEO_MAXRATE = "8M"         # VBV max rate — keeps bitrate predictable
 TRANSCODE_VIDEO_BUFSIZE = "16M"        # VBV buffer size — 2x maxrate is typical
@@ -58,6 +58,19 @@ TRANSCODE_AUDIO_SAMPLERATE = "48000"   # 48kHz — broadcast standard (not 44.1k
 # Duration in seconds for static images when converted to video assets.
 # Images become a black video of this length with the image composited on top.
 STATIC_IMAGE_DURATION = int(os.getenv("MCS_IMAGE_DURATION", "10"))
+
+# ── Browser source live encoding profile ─────────────────────────────────
+# Separate from the offline transcode profile because live x11grab encoding
+# has different tradeoffs: we can't use slow presets (CPU-bound in real time)
+# but we can afford higher bitrate since it's one stream at a time.
+# Priority order: quality > avoid macroblocking > minimize latency.
+BROWSER_SOURCE_VIDEO_BITRATE = os.getenv("MCS_BROWSER_VIDEO_BITRATE", "15M")
+BROWSER_SOURCE_VIDEO_PRESET = os.getenv("MCS_BROWSER_VIDEO_PRESET", "faster")
+# Empty string = no tune flag. "zerolatency" saves ~200ms but disables B-frames
+# and lookahead, significantly hurting quality. "film" or "stillimage" can help
+# for specific content types.
+BROWSER_SOURCE_VIDEO_TUNE = os.getenv("MCS_BROWSER_VIDEO_TUNE", "")
+BROWSER_SOURCE_AUDIO_BITRATE = os.getenv("MCS_BROWSER_AUDIO_BITRATE", "128k")
 
 # ── Streaming defaults ────────────────────────────────────────────────────────
 DEFAULT_MULTICAST_ADDRESS = os.getenv("MCS_DEFAULT_MCAST_ADDR", "239.1.1.1")

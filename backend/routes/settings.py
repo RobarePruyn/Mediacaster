@@ -71,6 +71,22 @@ DEFAULT_SETTINGS = {
         "value": str(config.STATIC_IMAGE_DURATION),
         "description": "Duration in seconds for image-to-video conversion",
     },
+    "browser_source_video_bitrate": {
+        "value": config.BROWSER_SOURCE_VIDEO_BITRATE,
+        "description": "Video bitrate for browser source live encoding (e.g. 15M, 20M)",
+    },
+    "browser_source_video_preset": {
+        "value": config.BROWSER_SOURCE_VIDEO_PRESET,
+        "description": "FFmpeg preset for browser source encoding (veryfast, faster, fast, medium)",
+    },
+    "browser_source_video_tune": {
+        "value": config.BROWSER_SOURCE_VIDEO_TUNE,
+        "description": "FFmpeg tune for browser source encoding (blank for none, zerolatency, film, stillimage)",
+    },
+    "browser_source_audio_bitrate": {
+        "value": config.BROWSER_SOURCE_AUDIO_BITRATE,
+        "description": "Audio bitrate for browser source encoding (e.g. 128k, 192k)",
+    },
     "multicast_ttl": {
         "value": str(config.MULTICAST_TTL),
         "description": "Multicast TTL (time-to-live / hop count)",
@@ -230,6 +246,11 @@ def _apply_runtime_settings(db: Session):
         config.TRANSCODE_VIDEO_PRESET = get_setting_value(db, "transcode_video_preset", "medium")
         config.TRANSCODE_VIDEO_PROFILE = get_setting_value(db, "transcode_video_profile", "main")
         config.STATIC_IMAGE_DURATION = int(get_setting_value(db, "static_image_duration", "10"))
+        # Browser source live encoding settings
+        config.BROWSER_SOURCE_VIDEO_BITRATE = get_setting_value(db, "browser_source_video_bitrate", "15M")
+        config.BROWSER_SOURCE_VIDEO_PRESET = get_setting_value(db, "browser_source_video_preset", "faster")
+        config.BROWSER_SOURCE_VIDEO_TUNE = get_setting_value(db, "browser_source_video_tune", "")
+        config.BROWSER_SOURCE_AUDIO_BITRATE = get_setting_value(db, "browser_source_audio_bitrate", "128k")
         config.MULTICAST_TTL = int(get_setting_value(db, "multicast_ttl", "16"))
         config.DEFAULT_MULTICAST_ADDRESS = get_setting_value(db, "default_multicast_address", "239.1.1.1")
         config.DEFAULT_MULTICAST_PORT = int(get_setting_value(db, "default_multicast_port", "5000"))

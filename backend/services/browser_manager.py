@@ -305,8 +305,10 @@ class BrowserManager:
             "-e", f"VNC_PORT={vnc_port}",
             "-e", f"NOVNC_PORT={novnc_port}",
             "-e", f"CAPTURE_AUDIO={'true' if capture_audio else 'false'}",
-            "-e", f"VIDEO_BITRATE={config.TRANSCODE_VIDEO_BITRATE}",
-            "-e", f"AUDIO_BITRATE={config.TRANSCODE_AUDIO_BITRATE}",
+            "-e", f"VIDEO_BITRATE={config.BROWSER_SOURCE_VIDEO_BITRATE}",
+            "-e", f"ENCODER_PRESET={config.BROWSER_SOURCE_VIDEO_PRESET}",
+            "-e", f"ENCODER_TUNE={config.BROWSER_SOURCE_VIDEO_TUNE}",
+            "-e", f"AUDIO_BITRATE={config.BROWSER_SOURCE_AUDIO_BITRATE}",
             CONTAINER_IMAGE,
         ]
 

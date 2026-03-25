@@ -311,14 +311,23 @@ FFMPEG_CMD+=(
     -vsync cfr
     -r "${FRAMERATE}"
     # Video encoding: H.264 Main profile for broad receiver compatibility.
-    # "ultrafast" preset minimizes encoding latency at the cost of bitrate
-    # efficiency — acceptable for live capture where latency matters more
-    # than compression ratio. "zerolatency" tune disables B-frames and
-    # lookahead for minimal encode-to-output delay.
+    # Preset and tune are configurable via the browser source settings in the
+    # admin UI. "faster" preset with no tune gives a good balance of quality
+    # and latency for live capture. Slower presets improve quality per bit but
+    # use more CPU; "zerolatency" tune reduces latency but disables B-frames.
     -c:v libx264
     -profile:v main
-    -preset ultrafast
-    -tune zerolatency
+    -preset "${ENCODER_PRESET:-faster}"
+)
+
+# Conditionally add the -tune flag only if ENCODER_TUNE is set and non-empty.
+# When empty, omitting -tune lets libx264 use its default behavior for the
+# chosen preset (B-frames enabled, lookahead active = better quality).
+if [[ -n "${ENCODER_TUNE:-}" ]]; then
+    FFMPEG_CMD+=(-tune "${ENCODER_TUNE}")
+fi
+
+FFMPEG_CMD+=(
     -b:v "${VIDEO_BITRATE}"
     -maxrate "${VIDEO_BITRATE}"
     # bufsize controls the VBV buffer. 2x bitrate gives a 2-second buffer —
