@@ -325,6 +325,34 @@ def get_monitoring(
                 total_mem += ps["memory_mb"]
             combined = {"cpu_percent": round(total_cpu, 1), "memory_mb": round(total_mem, 1)}
             active_raw_stats.append(combined)
+
+            # Assess quality risk for browser sources based on CPU contention.
+            # Browser containers run Firefox + ffmpeg + Xvfb competing for CPU.
+            # When total container CPU exceeds thresholds relative to available
+            # cores, ffmpeg can't maintain encoding quality (visible as macroblocking).
+            # Playlist streams use -c copy (no encoding) so CPU doesn't affect quality.
+            quality_risk = "ok"
+            quality_risk_reason = None
+            if is_browser:
+                # CPU percent is per-core (e.g., 400% = 4 full cores on an 8-core system).
+                # Convert to fraction of total system capacity for threshold comparison.
+                cpu_capacity = system_stats["cpu_count"] * 100
+                usage_fraction = total_cpu / cpu_capacity if cpu_capacity > 0 else 0
+                if usage_fraction >= 0.85:
+                    quality_risk = "critical"
+                    quality_risk_reason = (
+                        f"Container using {total_cpu:.0f}% CPU "
+                        f"({usage_fraction:.0%} of system) — "
+                        f"encoding quality severely degraded"
+                    )
+                elif usage_fraction >= 0.60:
+                    quality_risk = "warning"
+                    quality_risk_reason = (
+                        f"Container using {total_cpu:.0f}% CPU "
+                        f"({usage_fraction:.0%} of system) — "
+                        f"encoding quality may degrade during browser activity spikes"
+                    )
+
             active_stream_stats.append(StreamResourceInfo(
                 stream_id=stream.id,
                 stream_name=f"{'🌐 ' if is_browser else ''}{stream.name}",
@@ -332,6 +360,8 @@ def get_monitoring(
                 cpu_percent=combined["cpu_percent"],
                 memory_mb=combined["memory_mb"],
                 status="running",
+                quality_risk=quality_risk,
+                quality_risk_reason=quality_risk_reason,
             ))
         else:
             # Include stopped/idle streams in the list with no resource data

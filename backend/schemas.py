@@ -383,6 +383,12 @@ class StreamResourceInfo(BaseModel):
     cpu_percent: float = 0.0       # CPU usage percentage for this stream's process
     memory_mb: float = 0.0         # RSS memory in megabytes
     status: str = "stopped"
+    # Quality risk assessment: "ok", "warning", or "critical".
+    # Browser sources are CPU-bound — when their container uses too much CPU,
+    # ffmpeg can't maintain the target bitrate and output quality degrades
+    # (visible as macroblocking). This field lets the UI show proactive warnings.
+    quality_risk: str = "ok"
+    quality_risk_reason: Optional[str] = None
 
 
 class SystemMonitorResponse(BaseModel):

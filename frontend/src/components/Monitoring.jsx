@@ -83,8 +83,33 @@ export default function Monitoring() {
   const totalStreamCpu = runningStreams.reduce((sum, s) => sum + s.cpu_percent, 0);
   const totalStreamMem = runningStreams.reduce((sum, s) => sum + s.memory_mb, 0);
 
+  // Collect streams with quality risk for the alert banner
+  const qualityWarnings = data.active_streams.filter(
+    s => s.quality_risk === 'warning' || s.quality_risk === 'critical'
+  );
+
   return (
     <div className="monitoring-panel">
+      {/* ── Quality risk alert banner ────────────────────────────────────── */}
+      {qualityWarnings.length > 0 && (
+        <div className="monitor-section">
+          {qualityWarnings.map((s) => (
+            <div
+              key={s.stream_id}
+              className={`quality-alert quality-alert-${s.quality_risk}`}
+            >
+              <span className="quality-alert-icon">
+                {s.quality_risk === 'critical' ? '\u26A0' : '\u26A0'}
+              </span>
+              <div className="quality-alert-content">
+                <strong>{s.stream_name}</strong>
+                <span className="quality-alert-reason">{s.quality_risk_reason}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* ── System resource overview (bar meters) ────────────────────────── */}
       <div className="monitor-section">
         <h3 className="monitor-section-title">System Resources</h3>
@@ -163,6 +188,11 @@ export default function Monitoring() {
                 {/* Running streams show CPU/RAM metrics; stopped/starting streams show a status badge */}
                 {stream.status === 'running' ? (
                   <div className="stream-stat-metrics">
+                    {stream.quality_risk && stream.quality_risk !== 'ok' && (
+                      <span className={`quality-badge quality-badge-${stream.quality_risk}`}>
+                        {stream.quality_risk === 'critical' ? 'QUALITY CRITICAL' : 'QUALITY WARNING'}
+                      </span>
+                    )}
                     <span className="stream-stat-metric">
                       <span className="metric-label">CPU</span>
                       <span className="mono">{stream.cpu_percent}%</span>
