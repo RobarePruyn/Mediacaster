@@ -24,7 +24,7 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   uploadAsset, deleteAsset, renameAsset, addPlaylistItem, listAssets,
   getFolderTree, createFolder, updateFolder, deleteFolder,
-  updateFolderSharing, moveAssets,
+  updateFolderSharing, moveAssets, uploadPresentation,
 } from '../api';
 
 /* ── Utility functions ───────────────────────────────────────────────────── */
@@ -199,16 +199,28 @@ export default function AssetLibrary({ assets, isLoading, onRefresh, selectedStr
 
   /* ── Upload handlers ─────────────────────────────────────────────────── */
 
+  // Presentation file extensions — routed to the presentation upload API instead of asset upload
+  const PRESENTATION_EXTS = new Set(['.pptx', '.ppt', '.odp', '.pdf']);
+
   const handleFiles = async (files) => {
     setUploadError('');
     for (const file of files) {
+      const ext = file.name.slice(file.name.lastIndexOf('.')).toLowerCase();
+      const isPresentation = PRESENTATION_EXTS.has(ext);
       try {
         setUploadProgress(0);
-        const newAsset = await uploadAsset(file, (pct) => setUploadProgress(pct));
-        setUploadProgress(null);
-        // If we're viewing a specific folder, move the new asset into it
-        if (selectedFolderId && selectedFolderId > 0) {
-          try { await moveAssets([newAsset.id], selectedFolderId); } catch {}
+        if (isPresentation) {
+          // Presentation files are converted to slide images, not transcoded as media
+          await uploadPresentation(file, (pct) => setUploadProgress(pct));
+          setUploadProgress(null);
+          setUploadError('Presentation uploaded — select it in a Browser Source stream to use it.');
+        } else {
+          const newAsset = await uploadAsset(file, (pct) => setUploadProgress(pct));
+          setUploadProgress(null);
+          // If we're viewing a specific folder, move the new asset into it
+          if (selectedFolderId && selectedFolderId > 0) {
+            try { await moveAssets([newAsset.id], selectedFolderId); } catch {}
+          }
         }
         onRefresh();
       } catch (err) { setUploadError(err.message); setUploadProgress(null); }
