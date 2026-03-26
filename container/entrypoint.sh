@@ -318,14 +318,6 @@ echo "[entrypoint] Starting ffmpeg capture → ${MULTICAST_URL}"
 BITRATE_NUM="${VIDEO_BITRATE%%[^0-9]*}"
 BUFSIZE="${BITRATE_NUM}M"
 
-# Calculate MPEG-TS mux rate ~15% above total stream bitrate.
-# This gives the muxer headroom for TS overhead (PAT/PMT tables, PCR stamps,
-# null stuffing packets) while keeping output pacing smooth and constant.
-# Audio bitrate (e.g. "128k") is negligible relative to video but included.
-AUDIO_NUM="${AUDIO_BITRATE%%[^0-9]*}"
-MUXRATE_KBPS=$(( (BITRATE_NUM * 1000 + AUDIO_NUM) * 115 / 100 ))
-MUXRATE="${MUXRATE_KBPS}k"
-echo "[entrypoint] Mux rate: ${MUXRATE} (video: ${VIDEO_BITRATE}, audio: ${AUDIO_BITRATE})"
 
 # Build the ffmpeg command as an array for proper argument quoting.
 # The pipeline: x11grab input → libx264 encode → AAC audio → MPEG-TS mux → UDP output
@@ -418,15 +410,8 @@ FFMPEG_CMD+=(
     # good practice).
     -f mpegts
     -mpegts_transport_stream_id 1
-    # muxrate paces MPEG-TS output at a constant packet rate instead of
-    # letting ffmpeg dump packets in bursts after each frame encodes. Without
-    # this, a complex I-frame produces a burst of packets that can overflow
-    # edge switch buffers, causing simultaneous packet loss on all receivers
-    # (visible as brief freezes in VLC and macroblocking on hardware decoders).
-    # Set ~15% above total stream bitrate (video + audio + TS overhead).
-    -muxrate "${MUXRATE}"
     # flush_packets forces the muxer to write each packet immediately rather
-    # than buffering internally, further reducing burstiness.
+    # than buffering internally, keeping latency low for live capture.
     -flush_packets 1
     "${MULTICAST_URL}"
 )
