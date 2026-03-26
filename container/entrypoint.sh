@@ -311,16 +311,16 @@ fi
 
 echo "[entrypoint] Starting ffmpeg capture → ${MULTICAST_URL}"
 
-# Calculate VBV buffer size at 1x the video bitrate. A smaller buffer forces
-# the encoder to react faster to scene complexity changes, preventing the
-# slow ramp-up that causes macroblocking during transitions. For live screen
-# capture, fast reaction is more important than buffer headroom.
+# Parse the numeric portion of the bitrate for buffer size calculations.
+# VIDEO_BITRATE is a string like "8M" or "5M".
 BITRATE_NUM="${VIDEO_BITRATE%%[^0-9]*}"
-BUFSIZE="${BITRATE_NUM}M"
 
+# Use stream-configured GOP size if set, otherwise default to half framerate
+# (keyframe every 0.5s — halves worst-case recovery time over lossy UDP)
+GOP="${GOP_SIZE:-$(( FRAMERATE / 2 ))}"
 
 # Build the ffmpeg command as an array for proper argument quoting.
-# The pipeline: x11grab input → libx264 encode → AAC audio → MPEG-TS mux → UDP output
+# The pipeline: x11grab input → encode → AAC audio → MPEG-TS mux → UDP output
 FFMPEG_CMD=(
     ffmpeg -y
     # Video input: capture the virtual X11 display at the configured
@@ -362,43 +362,51 @@ FFMPEG_CMD+=(
     # cfr duplicates or drops frames as needed to maintain steady output.
     -vsync cfr
     -r "${FRAMERATE}"
-    # Video encoding: H.264 Main profile for broad receiver compatibility.
-    # Preset and tune are configurable via the browser source settings in the
-    # admin UI. "faster" preset with no tune gives a good balance of quality
-    # and latency for live capture. Slower presets improve quality per bit but
-    # use more CPU; "zerolatency" tune reduces latency but disables B-frames.
-    -c:v libx264
-    -profile:v main
-    -preset "${ENCODER_PRESET:-faster}"
 )
 
-# Conditionally add the -tune flag only if ENCODER_TUNE is set and non-empty.
-# When empty, omitting -tune lets libx264 use its default behavior for the
-# chosen preset (B-frames enabled, lookahead active = better quality).
-if [[ -n "${ENCODER_TUNE:-}" ]]; then
-    FFMPEG_CMD+=(-tune "${ENCODER_TUNE}")
+# Branch on VIDEO_CODEC to select the encoder and its rate control flags.
+# H.264 (libx264) and H.265 (libx265) use completely different VBV syntax.
+VIDEO_CODEC="${VIDEO_CODEC:-h264}"
+
+if [[ "${VIDEO_CODEC}" == "h265" ]]; then
+    # H.265/HEVC via libx265 — better compression at the cost of more CPU.
+    # Rate control is configured entirely through -x265-params because libx265
+    # ignores standard ffmpeg flags like -bufsize and -maxrate.
+    BUFSIZE_KBPS=$(( BITRATE_NUM * 1000 * 2 ))
+    MAXRATE_KBPS=$(( BITRATE_NUM * 1000 ))
+    FFMPEG_CMD+=(
+        -c:v libx265
+        -profile:v main
+        -preset "${ENCODER_PRESET:-fast}"
+        -b:v "${VIDEO_BITRATE}"
+        -x265-params "vbv-bufsize=${BUFSIZE_KBPS}:vbv-maxrate=${MAXRATE_KBPS}:nal-hrd=cbr:min-keyint=${GOP}:keyint=${GOP}"
+        -pix_fmt yuv420p
+    )
+    echo "[entrypoint] Using H.265 encoder: bitrate=${VIDEO_BITRATE} preset=${ENCODER_PRESET:-fast} GOP=${GOP}"
+else
+    # H.264 via libx264 — broad receiver compatibility, lower CPU usage.
+    # Main profile allows B-frames for better compression efficiency.
+    BUFSIZE="${BITRATE_NUM}M"
+    FFMPEG_CMD+=(
+        -c:v libx264
+        -profile:v main
+        -preset "${ENCODER_PRESET:-ultrafast}"
+        -b:v "${VIDEO_BITRATE}"
+        -minrate "${VIDEO_BITRATE}"
+        -maxrate "${VIDEO_BITRATE}"
+        # bufsize at 1x bitrate forces tight rate control — the encoder must
+        # maintain target bitrate consistently rather than slowly ramping up.
+        -bufsize "${BUFSIZE}"
+        # CBR NAL HRD mode pads the stream to maintain constant bitrate even
+        # during static scenes, keeping the VBV buffer full.
+        -nal-hrd cbr
+        -pix_fmt yuv420p
+        -g "${GOP}"
+    )
+    echo "[entrypoint] Using H.264 encoder: bitrate=${VIDEO_BITRATE} preset=${ENCODER_PRESET:-ultrafast} GOP=${GOP}"
 fi
 
 FFMPEG_CMD+=(
-    -b:v "${VIDEO_BITRATE}"
-    -minrate "${VIDEO_BITRATE}"
-    -maxrate "${VIDEO_BITRATE}"
-    # bufsize at 1x bitrate forces tight rate control — the encoder must
-    # maintain target bitrate consistently rather than slowly ramping up.
-    # This prevents the "undershoot on static, overshoot on complex" pattern
-    # that causes visible macroblocking during page transitions and scrolling.
-    -bufsize "${BUFSIZE}"
-    # CBR NAL HRD mode pads the stream to maintain constant bitrate even
-    # during static scenes, keeping the VBV buffer full so the encoder has
-    # immediate headroom when complexity spikes.
-    -nal-hrd cbr
-    # yuv420p is required for compatibility — many decoders reject yuv444p
-    -pix_fmt yuv420p
-    # GOP size = half the frame rate → keyframe every 0.5 seconds.
-    # Over lossy UDP multicast, losing an I-frame freezes all receivers until
-    # the next one. Halving the GOP interval from 1s to 0.5s halves worst-case
-    # recovery time at a small bitrate cost (~5% more due to extra I-frames).
-    -g $(( FRAMERATE / 2 ))
     # Audio encoding: AAC at 48kHz stereo — standard for broadcast MPEG-TS
     -c:a aac
     -b:a "${AUDIO_BITRATE}"

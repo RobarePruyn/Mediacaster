@@ -73,6 +73,19 @@ class StreamSourceType(str, enum.Enum):
     PRESENTATION = "presentation"  # LibreOffice Impress slideshow captured via x11grab
 
 
+class VideoCodec(str, enum.Enum):
+    """Video codec for stream output encoding."""
+    H264 = "h264"    # Broad compatibility, lower CPU for encoding
+    H265 = "h265"    # ~40% bitrate savings, required for 4K
+
+
+class RenditionStatus(str, enum.Enum):
+    """Lifecycle states for an asset rendition."""
+    PROCESSING = "processing"  # Transcode in progress
+    READY = "ready"            # Transcoded and available for playout
+    ERROR = "error"            # Transcode failed
+
+
 class PresentationStatus(str, enum.Enum):
     """Lifecycle states for an uploaded presentation."""
     UPLOADING = "uploading"    # File received, not yet converted
@@ -220,6 +233,36 @@ class Asset(Base):
     # cascade delete-orphan: if the asset is deleted, remove all playlist entries
     stream_items = relationship("StreamItem", back_populates="asset",
                                 cascade="all, delete-orphan")
+    # Multiple transcoded renditions at different resolution/codec combinations
+    renditions = relationship("AssetRendition", back_populates="asset",
+                              cascade="all, delete-orphan")
+
+
+class AssetRendition(Base):
+    """
+    A transcoded rendition of an asset at a specific resolution and codec.
+
+    The transcode ladder generates multiple renditions per upload (e.g., a
+    1080p source produces 1080p/h264 + 1080p/h265 + 720p/h264 renditions).
+    Playlist streams use -c copy from the rendition matching their encoding
+    profile, avoiding any runtime re-encoding.
+    """
+    __tablename__ = "asset_renditions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    asset_id = Column(Integer, ForeignKey("assets.id", ondelete="CASCADE"), nullable=False)
+    resolution = Column(String(16), nullable=False)       # e.g. "1920x1080"
+    codec = Column(String(8), nullable=False)             # "h264" or "h265"
+    framerate = Column(Integer, nullable=False, default=60)
+    file_path = Column(String(1024), nullable=True)       # Path to transcoded file
+    file_size_bytes = Column(Integer, nullable=True)
+    status = Column(SAEnum(RenditionStatus), default=RenditionStatus.PROCESSING)
+    error_message = Column(Text, nullable=True)
+    transcode_progress = Column(Float, default=0.0)       # 0.0 to 1.0
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+    # Relationships
+    asset = relationship("Asset", back_populates="renditions")
 
 
 class Stream(Base):
@@ -243,6 +286,13 @@ class Stream(Base):
     playback_mode = Column(SAEnum(PlaybackMode), default=PlaybackMode.LOOP)
     source_type = Column(SAEnum(StreamSourceType), default=StreamSourceType.PLAYLIST)
     ffmpeg_pid = Column(Integer, nullable=True)  # PID of the ffmpeg or container process
+    # Per-stream encoding profile — determines output resolution, codec, and quality.
+    # Defaults produce a clean 1080p30 H.264 stream suitable for most endpoints.
+    resolution = Column(String(16), nullable=False, default="1920x1080")   # 3840x2160, 1920x1080, 1280x720
+    codec = Column(String(8), nullable=False, default="h264")              # h264 or h265
+    framerate = Column(Integer, nullable=False, default=30)                # 30 or 60
+    video_bitrate = Column(String(16), nullable=True)   # Override auto-default (e.g. "8M"), null = use table
+    gop_size = Column(Integer, nullable=True)            # Override auto-default, null = framerate (1s GOP)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.datetime.utcnow,
                         onupdate=datetime.datetime.utcnow)

@@ -43,49 +43,18 @@ DEFAULT_SETTINGS = {
         "value": str(config.MAX_CONCURRENT_STREAMS),
         "description": "Maximum number of simultaneous multicast streams",
     },
-    "transcode_resolution": {
-        "value": config.TRANSCODE_RESOLUTION,
-        "description": "Target resolution for transcoded assets (WxH)",
-    },
-    "transcode_framerate": {
-        "value": config.TRANSCODE_FRAMERATE,
-        "description": "Target framerate for transcoded assets (fps)",
-    },
-    "transcode_video_bitrate": {
-        "value": config.TRANSCODE_VIDEO_BITRATE,
-        "description": "Target video bitrate for transcoded assets (e.g. 8M, 4M)",
-    },
+    # Transcode audio and image duration are still global (not per-stream)
     "transcode_audio_bitrate": {
         "value": config.TRANSCODE_AUDIO_BITRATE,
-        "description": "Target audio bitrate for transcoded assets (e.g. 128k, 256k)",
-    },
-    "transcode_video_preset": {
-        "value": config.TRANSCODE_VIDEO_PRESET,
-        "description": "FFmpeg encoding preset (ultrafast, fast, medium, slow, veryslow)",
-    },
-    "transcode_video_profile": {
-        "value": config.TRANSCODE_VIDEO_PROFILE,
-        "description": "H.264 profile (baseline, main, high)",
+        "description": "Audio bitrate for transcoded assets (e.g. 128k, 256k)",
     },
     "static_image_duration": {
         "value": str(config.STATIC_IMAGE_DURATION),
         "description": "Duration in seconds for image-to-video conversion",
     },
-    "browser_source_video_bitrate": {
-        "value": config.BROWSER_SOURCE_VIDEO_BITRATE,
-        "description": "Video bitrate for browser source live encoding (e.g. 15M, 20M)",
-    },
-    "browser_source_video_preset": {
-        "value": config.BROWSER_SOURCE_VIDEO_PRESET,
-        "description": "FFmpeg preset for browser source encoding (veryfast, faster, fast, medium)",
-    },
-    "browser_source_video_tune": {
-        "value": config.BROWSER_SOURCE_VIDEO_TUNE,
-        "description": "FFmpeg tune for browser source encoding (blank for none, zerolatency, film, stillimage)",
-    },
     "browser_source_audio_bitrate": {
         "value": config.BROWSER_SOURCE_AUDIO_BITRATE,
-        "description": "Audio bitrate for browser source encoding (e.g. 128k, 192k)",
+        "description": "Audio bitrate for browser/presentation source encoding (e.g. 128k, 192k)",
     },
     "multicast_ttl": {
         "value": str(config.MULTICAST_TTL),
@@ -237,19 +206,10 @@ def _apply_runtime_settings(db: Session):
     """
     try:
         config.MAX_CONCURRENT_STREAMS = int(get_setting_value(db, "max_concurrent_streams", "8"))
-        config.TRANSCODE_RESOLUTION = get_setting_value(db, "transcode_resolution", "1920x1080")
-        config.TRANSCODE_FRAMERATE = get_setting_value(db, "transcode_framerate", "30")
-        config.TRANSCODE_VIDEO_BITRATE = get_setting_value(db, "transcode_video_bitrate", "8M")
-        # maxrate mirrors bitrate to enforce CBR-like behavior in ffmpeg
-        config.TRANSCODE_VIDEO_MAXRATE = config.TRANSCODE_VIDEO_BITRATE
+        # Video encoding is now per-stream (resolution, codec, framerate, bitrate).
+        # Only audio settings and image duration remain global.
         config.TRANSCODE_AUDIO_BITRATE = get_setting_value(db, "transcode_audio_bitrate", "128k")
-        config.TRANSCODE_VIDEO_PRESET = get_setting_value(db, "transcode_video_preset", "medium")
-        config.TRANSCODE_VIDEO_PROFILE = get_setting_value(db, "transcode_video_profile", "main")
         config.STATIC_IMAGE_DURATION = int(get_setting_value(db, "static_image_duration", "10"))
-        # Browser source live encoding settings
-        config.BROWSER_SOURCE_VIDEO_BITRATE = get_setting_value(db, "browser_source_video_bitrate", "15M")
-        config.BROWSER_SOURCE_VIDEO_PRESET = get_setting_value(db, "browser_source_video_preset", "faster")
-        config.BROWSER_SOURCE_VIDEO_TUNE = get_setting_value(db, "browser_source_video_tune", "")
         config.BROWSER_SOURCE_AUDIO_BITRATE = get_setting_value(db, "browser_source_audio_bitrate", "128k")
         config.MULTICAST_TTL = int(get_setting_value(db, "multicast_ttl", "16"))
         config.DEFAULT_MULTICAST_ADDRESS = get_setting_value(db, "default_multicast_address", "239.1.1.1")

@@ -1,6 +1,13 @@
 """
 Presentation converter — converts uploaded slideshow files to per-slide PNG images
-using LibreOffice headless.
+using LibreOffice headless + pdftoppm (poppler-utils).
+
+Pipeline: PPTX/PPT/ODP → LibreOffice → PDF → pdftoppm → per-page PNGs.
+PDF uploads skip the LibreOffice step and go straight to pdftoppm.
+
+This two-step approach is necessary because LibreOffice's --convert-to png
+only produces a single image for presentation files — it doesn't split slides.
+pdftoppm reliably splits each PDF page into an individual PNG.
 
 Supports PPTX, PPT, ODP, and PDF formats. Each presentation gets its own subdirectory
 under PRESENTATIONS_DIR containing sequentially named slide images (slide_001.png, etc.).
@@ -58,49 +65,14 @@ async def convert_presentation(presentation_id: int, upload_path: str,
             slides_dir = str(config.PRESENTATIONS_DIR / str(presentation_id))
             os.makedirs(slides_dir, exist_ok=True)
 
-            # Run LibreOffice headless to convert slides to PNG
-            cmd = [
-                config.LIBREOFFICE_PATH,
-                "--headless",
-                "--convert-to", "png",
-                "--outdir", slides_dir,
-                upload_path,
-            ]
-            logger.info("Converting presentation %d: %s", presentation_id, " ".join(cmd))
+            upload_ext = Path(upload_path).suffix.lower()
 
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await proc.communicate()
-
-            if proc.returncode != 0:
-                error_msg = stderr.decode().strip() or stdout.decode().strip()
-                logger.error("LibreOffice conversion failed for presentation %d: %s",
-                             presentation_id, error_msg)
-                presentation.status = PresentationStatus.ERROR
-                presentation.error_message = f"Conversion failed: {error_msg[:500]}"
-                db.commit()
-                return
-
-            # For single-file inputs (PPTX), LibreOffice produces one PNG.
-            # For multi-page PDFs, it produces multiple PNGs.
-            # For PPTX/ODP, LibreOffice actually produces one PNG per slide
-            # but only when using the "Impress" filter. The default --convert-to png
-            # for presentations may produce one file per slide or a single file.
-            #
-            # We need to handle both cases. LibreOffice names output files based on
-            # the input filename, e.g., "presentation.png" for single or
-            # "presentation-1.png", "presentation-2.png" for multiple.
-            #
-            # Collect all PNG files and rename to slide_001.png, slide_002.png, etc.
-            png_files = sorted(Path(slides_dir).glob("*.png"))
-
-            if not png_files:
-                # Fallback: try PDF-based conversion for PPTX
-                # First convert to PDF, then PDF pages to PNGs
-                pdf_path = os.path.join(slides_dir, "temp_convert.pdf")
+            # Step 1: Get a PDF.
+            # If the upload is already a PDF, use it directly.
+            # Otherwise, convert PPTX/PPT/ODP → PDF via LibreOffice headless.
+            if upload_ext == ".pdf":
+                pdf_path = upload_path
+            else:
                 cmd_to_pdf = [
                     config.LIBREOFFICE_PATH,
                     "--headless",
@@ -108,41 +80,74 @@ async def convert_presentation(presentation_id: int, upload_path: str,
                     "--outdir", slides_dir,
                     upload_path,
                 ]
-                proc2 = await asyncio.create_subprocess_exec(
+                logger.info("Converting presentation %d to PDF: %s",
+                            presentation_id, " ".join(cmd_to_pdf))
+
+                proc = await asyncio.create_subprocess_exec(
                     *cmd_to_pdf,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
-                await proc2.communicate()
+                stdout, stderr = await proc.communicate()
 
-                # Find the produced PDF
+                if proc.returncode != 0:
+                    error_msg = stderr.decode().strip() or stdout.decode().strip()
+                    logger.error("LibreOffice PDF conversion failed for presentation %d: %s",
+                                 presentation_id, error_msg)
+                    presentation.status = PresentationStatus.ERROR
+                    presentation.error_message = f"PDF conversion failed: {error_msg[:500]}"
+                    db.commit()
+                    return
+
+                # LibreOffice names the output based on the input filename
                 pdf_files = list(Path(slides_dir).glob("*.pdf"))
-                if pdf_files:
-                    pdf_path = str(pdf_files[0])
-                    # Use ffmpeg to extract PDF pages as PNGs
-                    # (LibreOffice may not split PDF pages to individual PNGs)
-                    # Actually, let's use pdftoppm if available, or try
-                    # LibreOffice again with the PDF as input
-                    cmd_pdf_to_png = [
-                        config.LIBREOFFICE_PATH,
-                        "--headless",
-                        "--convert-to", "png",
-                        "--outdir", slides_dir,
-                        pdf_path,
-                    ]
-                    proc3 = await asyncio.create_subprocess_exec(
-                        *cmd_pdf_to_png,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE,
-                    )
-                    await proc3.communicate()
-                    # Clean up temp PDF
-                    try:
-                        os.remove(pdf_path)
-                    except OSError:
-                        pass
+                if not pdf_files:
+                    presentation.status = PresentationStatus.ERROR
+                    presentation.error_message = "LibreOffice produced no PDF output"
+                    db.commit()
+                    return
+                pdf_path = str(pdf_files[0])
 
-                png_files = sorted(Path(slides_dir).glob("*.png"))
+            # Step 2: Split PDF pages into individual PNGs using pdftoppm.
+            # pdftoppm outputs files named <prefix>-01.png, <prefix>-02.png, etc.
+            # -r 150 gives 1920x1080-ish output for standard 16:9 slides at good quality.
+            png_prefix = os.path.join(slides_dir, "slide")
+            cmd_pdftoppm = [
+                "pdftoppm",
+                "-png",           # Output format
+                "-r", "150",      # Resolution in DPI (150 ≈ 1920px wide for 16:9)
+                pdf_path,
+                png_prefix,
+            ]
+            logger.info("Splitting PDF to PNGs for presentation %d: %s",
+                        presentation_id, " ".join(cmd_pdftoppm))
+
+            proc2 = await asyncio.create_subprocess_exec(
+                *cmd_pdftoppm,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout2, stderr2 = await proc2.communicate()
+
+            if proc2.returncode != 0:
+                error_msg = stderr2.decode().strip() or stdout2.decode().strip()
+                logger.error("pdftoppm failed for presentation %d: %s",
+                             presentation_id, error_msg)
+                presentation.status = PresentationStatus.ERROR
+                presentation.error_message = f"PDF split failed: {error_msg[:500]}"
+                db.commit()
+                return
+
+            # Clean up the intermediate PDF (unless the upload was already a PDF)
+            if upload_ext != ".pdf" and os.path.exists(pdf_path):
+                try:
+                    os.remove(pdf_path)
+                except OSError:
+                    pass
+
+            # Collect all PNGs and rename to slide_001.png, slide_002.png, etc.
+            # pdftoppm names them slide-01.png or slide-1.png depending on page count
+            png_files = sorted(Path(slides_dir).glob("slide-*.png"))
 
             if not png_files:
                 presentation.status = PresentationStatus.ERROR
@@ -150,7 +155,6 @@ async def convert_presentation(presentation_id: int, upload_path: str,
                 db.commit()
                 return
 
-            # Rename all PNGs to a predictable sequential pattern
             slide_count = 0
             for i, png_file in enumerate(png_files, start=1):
                 new_name = Path(slides_dir) / f"slide_{i:03d}.png"

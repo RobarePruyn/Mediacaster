@@ -30,8 +30,10 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Backgro
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from backend.database import get_db, SessionLocal
-from backend.models import Asset, AssetStatus, User, Folder, FolderShareMode
-from backend.schemas import AssetResponse, AssetListResponse, AssetRename, StorageResponse
+from backend.models import Asset, AssetStatus, AssetRendition, User, Folder, FolderShareMode
+from backend.schemas import (
+    AssetResponse, AssetRenditionResponse, AssetListResponse, AssetRename, StorageResponse,
+)
 from backend.auth import get_current_user
 from backend.config import UPLOAD_DIR, MEDIA_DIR
 from backend.services.transcoder import classify_upload, ALL_EXTENSIONS, transcode_asset
@@ -47,6 +49,20 @@ def _to_response(asset: Asset) -> AssetResponse:
     or the asset has finished transcoding, so the frontend doesn't render
     broken image/video links.
     """
+    # Build rendition list from the ORM relationship
+    rendition_list = []
+    if hasattr(asset, "renditions") and asset.renditions:
+        for r in asset.renditions:
+            rendition_list.append(AssetRenditionResponse(
+                id=r.id,
+                resolution=r.resolution,
+                codec=r.codec,
+                framerate=r.framerate,
+                status=r.status.value if hasattr(r.status, "value") else str(r.status),
+                file_size_bytes=r.file_size_bytes,
+                transcode_progress=r.transcode_progress or 0.0,
+            ))
+
     return AssetResponse(
         id=asset.id,
         # Fall back to the original filename if no display name was set
@@ -65,6 +81,7 @@ def _to_response(asset: Asset) -> AssetResponse:
         owner_name=asset.owner.username if asset.owner else None,
         folder_id=asset.folder_id,
         folder_name=asset.folder.name if asset.folder else None,
+        renditions=rendition_list,
         created_at=asset.created_at, updated_at=asset.updated_at)
 
 
@@ -261,15 +278,28 @@ def delete_asset(asset_id: int, db: Session = Depends(get_db),
         raise HTTPException(status_code=404, detail="Asset not found")
     if not current_user.is_admin and asset.owner_id != current_user.id:
         raise HTTPException(status_code=403, detail="Access denied")
-    # Remove associated files from disk (transcoded media + thumbnail)
+    # Remove rendition files from disk
+    renditions = db.query(AssetRendition).filter(
+        AssetRendition.asset_id == asset_id
+    ).all()
+    for rendition in renditions:
+        if rendition.file_path and os.path.exists(rendition.file_path):
+            try:
+                os.remove(rendition.file_path)
+            except OSError as exc:
+                logger.warning("Failed to remove rendition file %s: %s",
+                               rendition.file_path, exc)
+
+    # Remove the primary file and thumbnail
     for file_path in [asset.file_path, asset.thumbnail_path]:
         if file_path and os.path.exists(file_path):
             try:
                 os.remove(file_path)
             except OSError as exc:
-                # Log but don't fail — orphaned files are acceptable
                 logger.warning("Failed to remove file %s during asset deletion: %s",
                                file_path, exc)
+
+    # CASCADE will handle rendition DB records, just delete the asset
     db.delete(asset)
     db.commit()
 

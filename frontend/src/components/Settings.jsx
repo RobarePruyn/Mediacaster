@@ -209,11 +209,7 @@ export default function Settings({ currentUser }) {
    */
   const settingCategories = {
     'Stream Limits': ['max_concurrent_streams', 'max_cpu_utilization', 'max_bandwidth_utilization'],
-    'Transcode Profile': ['transcode_resolution', 'transcode_framerate', 'transcode_video_bitrate',
-                          'transcode_audio_bitrate', 'transcode_video_preset', 'transcode_video_profile'],
-    'Browser Source Encoding': ['browser_source_video_bitrate', 'browser_source_video_preset',
-                                'browser_source_video_tune', 'browser_source_audio_bitrate'],
-    'Media Defaults': ['static_image_duration'],
+    'Audio & Media': ['transcode_audio_bitrate', 'browser_source_audio_bitrate', 'static_image_duration'],
     'Multicast Defaults': ['default_multicast_address', 'default_multicast_port', 'multicast_ttl'],
     'Single Sign-On (OIDC)': ['oidc_enabled', 'oidc_discovery_url', 'oidc_client_id',
                                'oidc_client_secret', 'oidc_display_name'],

@@ -151,6 +151,8 @@ class AssetResponse(BaseModel):
     owner_name: Optional[str] = None
     folder_id: Optional[int] = None
     folder_name: Optional[str] = None
+    # Renditions available for this asset (populated after transcode ladder completes)
+    renditions: List["AssetRenditionResponse"] = []
     created_at: datetime
     updated_at: datetime
 
@@ -248,6 +250,20 @@ class MoveAssetsRequest(BaseModel):
 
 # ── Streams ───────────────────────────────────────────────────────────────────
 
+class AssetRenditionResponse(BaseModel):
+    """A single transcoded rendition of an asset."""
+    id: int
+    resolution: str           # e.g. "1920x1080"
+    codec: str                # "h264" or "h265"
+    framerate: int
+    status: str               # "processing", "ready", or "error"
+    file_size_bytes: Optional[int] = None
+    transcode_progress: float = 0.0
+
+    class Config:
+        from_attributes = True
+
+
 class StreamCreate(BaseModel):
     """Request to create a new multicast stream (admin only)."""
     name: str = Field(default="Default Stream", max_length=256)
@@ -256,6 +272,12 @@ class StreamCreate(BaseModel):
     multicast_port: int = Field(default=5000, ge=1024, le=65535)
     playback_mode: str = Field(default="loop")
     source_type: str = Field(default="playlist")  # "playlist", "browser", or "presentation"
+    # Per-stream encoding profile
+    resolution: str = Field(default="1920x1080")   # "3840x2160", "1920x1080", "1280x720"
+    codec: str = Field(default="h264")             # "h264" or "h265"
+    framerate: int = Field(default=30)             # 30 or 60
+    video_bitrate: Optional[str] = None            # Override auto-default (e.g. "8M")
+    gop_size: Optional[int] = None                 # Override auto-default
 
 
 class StreamUpdate(BaseModel):
@@ -264,6 +286,12 @@ class StreamUpdate(BaseModel):
     multicast_address: Optional[str] = None
     multicast_port: Optional[int] = Field(default=None, ge=1024, le=65535)
     playback_mode: Optional[str] = None
+    # Per-stream encoding profile (partial updates supported)
+    resolution: Optional[str] = None
+    codec: Optional[str] = None
+    framerate: Optional[int] = None
+    video_bitrate: Optional[str] = None
+    gop_size: Optional[int] = None
 
 
 class BrowserSourceConfig(BaseModel):
@@ -341,6 +369,14 @@ class StreamResponse(BaseModel):
     status: str                # "stopped", "starting", "running", or "error"
     playback_mode: str         # "loop" or "oneshot"
     source_type: str = "playlist"  # "playlist", "browser", or "presentation"
+    # Per-stream encoding profile
+    resolution: str = "1920x1080"
+    codec: str = "h264"
+    framerate: int = 30
+    video_bitrate: Optional[str] = None       # User override, null = auto-default
+    effective_bitrate: str = "8M"             # Computed: override or table default
+    gop_size: Optional[int] = None            # User override, null = auto-default
+    effective_gop_size: int = 30              # Computed: override or framerate
     items: List[StreamItemResponse] = []
     browser_source: Optional[BrowserSourceResponse] = None
     remote_control: Optional[RemoteControlInfo] = None  # Present when browser source has a linked presentation
@@ -399,6 +435,7 @@ class StreamResourceInfo(BaseModel):
     # Browser sources are CPU-bound — when their container uses too much CPU,
     # ffmpeg can't maintain the target bitrate and output quality degrades
     # (visible as macroblocking). This field lets the UI show proactive warnings.
+    encoding_speed: Optional[float] = None   # ffmpeg speed= value (1.0 = real-time)
     quality_risk: str = "ok"
     quality_risk_reason: Optional[str] = None
 

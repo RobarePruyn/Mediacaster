@@ -42,6 +42,11 @@ from backend.schemas import (
     StreamItemCreate, StreamItemReorder, StreamAssignRequest,
     BrowserSourceConfig,
 )
+from backend.services.encoding_profiles import (
+    get_effective_bitrate, get_effective_gop_size, validate_stream_profile,
+    estimate_cpu_cost,
+)
+from backend.services.monitor import get_system_stats
 from backend.auth import get_current_user
 
 logger = logging.getLogger("streams")
@@ -121,6 +126,21 @@ def _to_response(stream: Stream) -> dict:
         "status": stream.status.value,
         "playback_mode": stream.playback_mode.value,
         "source_type": stream.source_type.value if stream.source_type else "playlist",
+        # Per-stream encoding profile
+        "resolution": stream.resolution or "1920x1080",
+        "codec": stream.codec or "h264",
+        "framerate": stream.framerate or 30,
+        "video_bitrate": stream.video_bitrate,
+        "effective_bitrate": get_effective_bitrate(
+            stream.resolution or "1920x1080",
+            stream.framerate or 30,
+            stream.codec or "h264",
+            stream.video_bitrate,
+        ),
+        "gop_size": stream.gop_size,
+        "effective_gop_size": get_effective_gop_size(
+            stream.framerate or 30, stream.gop_size,
+        ),
         "items": items,
         "browser_source": browser_data,
         "remote_control": remote_control,
@@ -159,12 +179,25 @@ def create_stream(body: StreamCreate, db: Session = Depends(get_db),
         )
 
     source_type = StreamSourceType(body.source_type)
+
+    # Validate encoding profile constraints
+    profile_error = validate_stream_profile(
+        body.source_type, body.resolution, body.codec, body.framerate,
+    )
+    if profile_error:
+        raise HTTPException(status_code=400, detail=profile_error)
+
     stream = Stream(
         name=body.name,
         multicast_address=body.multicast_address,
         multicast_port=body.multicast_port,
         playback_mode=PlaybackMode(body.playback_mode),
         source_type=source_type,
+        resolution=body.resolution,
+        codec=body.codec,
+        framerate=body.framerate,
+        video_bitrate=body.video_bitrate,
+        gop_size=body.gop_size,
     )
     db.add(stream)
     # Flush to get stream.id assigned before creating the child BrowserSource
@@ -227,6 +260,23 @@ def update_stream(stream_id: int, body: StreamUpdate, db: Session = Depends(get_
     if body.multicast_address is not None: stream.multicast_address = body.multicast_address
     if body.multicast_port is not None: stream.multicast_port = body.multicast_port
     if body.playback_mode is not None: stream.playback_mode = PlaybackMode(body.playback_mode)
+    # Per-stream encoding profile updates
+    if body.resolution is not None: stream.resolution = body.resolution
+    if body.codec is not None: stream.codec = body.codec
+    if body.framerate is not None: stream.framerate = body.framerate
+    # Allow explicit null to clear overrides (revert to auto-defaults)
+    if "video_bitrate" in (body.model_fields_set if hasattr(body, 'model_fields_set') else set()):
+        stream.video_bitrate = body.video_bitrate
+    if "gop_size" in (body.model_fields_set if hasattr(body, 'model_fields_set') else set()):
+        stream.gop_size = body.gop_size
+
+    # Validate encoding profile after applying changes
+    profile_error = validate_stream_profile(
+        stream.source_type.value if stream.source_type else "playlist",
+        stream.resolution, stream.codec, stream.framerate,
+    )
+    if profile_error:
+        raise HTTPException(status_code=400, detail=profile_error)
 
     # If multicast address or port changed, check for conflicts with other streams
     conflict = db.query(Stream).filter(
@@ -463,6 +513,29 @@ async def start_stream(stream_id: int, request: Request, db: Session = Depends(g
     if not _user_can_manage(current_user, stream):
         raise HTTPException(status_code=403, detail="Not assigned to this stream")
 
+    # Pre-start capacity check: estimate whether the server has enough CPU headroom
+    # for this stream's encoding profile. Only a warning — does not block start.
+    capacity_warning = None
+    try:
+        estimated_cost = estimate_cpu_cost(
+            stream.source_type.value if hasattr(stream.source_type, "value") else str(stream.source_type),
+            stream.resolution or "1920x1080",
+            stream.framerate or 30,
+            stream.codec or "h264",
+        )
+        system_stats = get_system_stats()
+        current_cpu = system_stats["cpu_percent"]
+        # Warn if the estimated total would exceed 80% of system CPU
+        if current_cpu + estimated_cost > 80.0:
+            capacity_warning = (
+                f"CPU headroom warning: system at {current_cpu:.0f}%, "
+                f"this stream estimated to add ~{estimated_cost:.0f}%. "
+                f"Quality may degrade."
+            )
+            logger.warning("Capacity warning for stream %d: %s", stream_id, capacity_warning)
+    except Exception as exc:
+        logger.debug("Capacity check failed (non-fatal): %s", exc)
+
     if stream.source_type == StreamSourceType.BROWSER:
         bm = request.app.state.browser_manager
         if not stream.browser_source or not stream.browser_source.url:
@@ -478,7 +551,10 @@ async def start_stream(stream_id: int, request: Request, db: Session = Depends(g
         stream.status = StreamStatus.RUNNING
         stream.ffmpeg_pid = result.get("ffmpeg_pid")
         db.commit()
-        return {"message": f"Browser stream {stream_id} started", "status": "running", **result}
+        resp = {"message": f"Browser stream {stream_id} started", "status": "running", **result}
+        if capacity_warning:
+            resp["capacity_warning"] = capacity_warning
+        return resp
 
     elif stream.source_type == StreamSourceType.PRESENTATION:
         bm = request.app.state.browser_manager
@@ -503,7 +579,10 @@ async def start_stream(stream_id: int, request: Request, db: Session = Depends(g
             raise HTTPException(status_code=400, detail=str(e))
         stream.status = StreamStatus.RUNNING
         db.commit()
-        return {"message": f"Presentation stream {stream_id} started", "status": "running", **result}
+        resp = {"message": f"Presentation stream {stream_id} started", "status": "running", **result}
+        if capacity_warning:
+            resp["capacity_warning"] = capacity_warning
+        return resp
 
     else:
         # Playlist stream — stream_manager handles status updates internally
@@ -512,7 +591,10 @@ async def start_stream(stream_id: int, request: Request, db: Session = Depends(g
             await sm.start_stream(stream_id)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
-        return {"message": f"Stream {stream_id} started", "status": "running"}
+        resp = {"message": f"Stream {stream_id} started", "status": "running"}
+        if capacity_warning:
+            resp["capacity_warning"] = capacity_warning
+        return resp
 
 
 @router.post("/{stream_id}/stop")

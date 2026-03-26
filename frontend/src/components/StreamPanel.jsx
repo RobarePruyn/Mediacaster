@@ -36,8 +36,14 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
   const [playlistDirty, setPlaylistDirty] = useState(false);
   /** Whether the multicast output config is in edit mode */
   const [editing, setEditing] = useState(false);
-  /** Form state for multicast output config (name, address, port, playback_mode) */
-  const [form, setForm] = useState({ name: '', multicast_address: '', multicast_port: '', playback_mode: 'loop' });
+  /** Form state for multicast output config (name, address, port, playback_mode, encoding) */
+  const [form, setForm] = useState({
+    name: '', multicast_address: '', multicast_port: '', playback_mode: 'loop',
+    resolution: '1920x1080', codec: 'h264', framerate: 30,
+    video_bitrate: '', gop_size: '',
+  });
+  /** Whether the encoding advanced section is expanded */
+  const [showEncoding, setShowEncoding] = useState(false);
   /** True while a new stream creation request is in-flight */
   const [creating, setCreating] = useState(false);
   /** Source type selection for the "New" button dropdown */
@@ -136,6 +142,11 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
         multicast_address: currentStream.multicast_address,
         multicast_port: String(currentStream.multicast_port),
         playback_mode: currentStream.playback_mode,
+        resolution: currentStream.resolution || '1920x1080',
+        codec: currentStream.codec || 'h264',
+        framerate: currentStream.framerate || 30,
+        video_bitrate: currentStream.video_bitrate || '',
+        gop_size: currentStream.gop_size != null ? String(currentStream.gop_size) : '',
       });
       // Sync browser/presentation source config for container-based streams
       if (currentStream.browser_source) {
@@ -173,6 +184,7 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
         name: defaultNames[newSourceType] || 'New Stream',
         multicast_address: '239.1.1.1', multicast_port: 5000,
         playback_mode: 'loop', source_type: newSourceType,
+        resolution: '1920x1080', codec: 'h264', framerate: 30,
       });
       await onRefresh();
       onSelectStream(newStream.id);
@@ -185,7 +197,21 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
   const handleSave = async () => {
     if (!selectedStreamId) return; setErrorMsg('');
     try {
-      await updateStream(selectedStreamId, { ...form, multicast_port: parseInt(form.multicast_port, 10) });
+      const payload = {
+        name: form.name,
+        multicast_address: form.multicast_address,
+        multicast_port: parseInt(form.multicast_port, 10),
+        playback_mode: form.playback_mode,
+        resolution: form.resolution,
+        codec: form.codec,
+        framerate: parseInt(form.framerate, 10),
+      };
+      // Only send overrides if the user entered a value (empty = use auto-default)
+      if (form.video_bitrate) payload.video_bitrate = form.video_bitrate;
+      else payload.video_bitrate = null;
+      if (form.gop_size) payload.gop_size = parseInt(form.gop_size, 10);
+      else payload.gop_size = null;
+      await updateStream(selectedStreamId, payload);
       setEditing(false); onRefresh();
     } catch (e) { setErrorMsg(e.message); }
   };
@@ -243,10 +269,15 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
    * Generic wrapper for transport actions (start/stop/restart).
    * Sets busy state to disable buttons during the request and shows errors on failure.
    */
+  /** Capacity warning message returned from the start endpoint */
+  const [capacityWarning, setCapacityWarning] = useState('');
+
   const doAction = async (fn) => {
-    setBusy(true); setErrorMsg('');
+    setBusy(true); setErrorMsg(''); setCapacityWarning('');
     try {
-      await fn();
+      const result = await fn();
+      // The start endpoint may return a capacity_warning field
+      if (result?.capacity_warning) setCapacityWarning(result.capacity_warning);
       setPlaylistDirty(false);
       onRefresh();
     } catch (e) { setErrorMsg(e.message); }
@@ -366,6 +397,51 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
                     </select></div>
                 </div>
               )}
+
+              {/* Encoding profile settings */}
+              <div style={{ borderTop: '1px solid var(--border)', paddingTop: 8, marginTop: 8 }}>
+                <button className="btn btn-xs btn-ghost" style={{ marginBottom: 8 }}
+                  onClick={() => setShowEncoding(!showEncoding)}>
+                  {showEncoding ? '▾' : '▸'} Encoding Profile
+                </button>
+                {showEncoding && (
+                  <>
+                    <div className="form-row">
+                      <div className="form-group"><label>Resolution</label>
+                        <select value={form.resolution}
+                          onChange={e => setForm({...form, resolution: e.target.value})}>
+                          <option value="1280x720">720p (1280x720)</option>
+                          <option value="1920x1080">1080p (1920x1080)</option>
+                          <option value="3840x2160">4K (3840x2160)</option>
+                        </select></div>
+                      <div className="form-group"><label>Codec</label>
+                        <select value={form.codec}
+                          onChange={e => setForm({...form, codec: e.target.value})}>
+                          <option value="h264">H.264</option>
+                          <option value="h265">H.265 (HEVC)</option>
+                        </select></div>
+                    </div>
+                    <div className="form-row">
+                      <div className="form-group"><label>Frame Rate</label>
+                        <select value={form.framerate}
+                          onChange={e => setForm({...form, framerate: parseInt(e.target.value, 10)})}>
+                          <option value={30}>30 fps</option>
+                          <option value={60}>60 fps</option>
+                        </select></div>
+                      <div className="form-group"><label>Video Bitrate</label>
+                        <input type="text" value={form.video_bitrate}
+                          onChange={e => setForm({...form, video_bitrate: e.target.value})}
+                          placeholder="Auto" /></div>
+                    </div>
+                    <div className="form-row">
+                      <div className="form-group"><label>GOP Size</label>
+                        <input type="text" value={form.gop_size}
+                          onChange={e => setForm({...form, gop_size: e.target.value})}
+                          placeholder="Auto (= framerate)" /></div>
+                    </div>
+                  </>
+                )}
+              </div>
             </div>
           ) : (
             <div className="config-display">
@@ -379,6 +455,12 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
                 <div className="config-value"><span className="config-label">Mode</span>
                   <span>{currentStream.playback_mode === 'loop' ? 'Loop' : 'One-shot'}</span></div>
               )}
+              <div className="config-value"><span className="config-label">Encoding</span>
+                <span className="mono" style={{ fontSize: 12 }}>
+                  {currentStream.resolution} {currentStream.codec?.toUpperCase()} @{currentStream.framerate}fps
+                  {' '}{currentStream.effective_bitrate || '?'}bps
+                </span>
+              </div>
             </div>
           )}
         </div>
@@ -557,6 +639,13 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
                 Last ▶|
               </button>
             </div>
+          </div>
+        )}
+
+        {/* Capacity warning banner (shown after starting a stream with low headroom) */}
+        {capacityWarning && (
+          <div className="panel-error" style={{ background: 'var(--warning-bg, #3d2e00)', borderColor: 'var(--warning-border, #b8860b)' }}>
+            {capacityWarning}
           </div>
         )}
 

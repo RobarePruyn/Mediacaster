@@ -8,9 +8,10 @@ This service is responsible for the entire lifecycle of multicast playout:
   3. Monitoring those processes and auto-restarting on crash (in loop mode)
   4. Tracking stream status and PID in the database for the frontend and monitoring
 
-Because all assets are pre-transcoded to the same H.264/AAC profile by the transcoder
-service, the playout ffmpeg uses -c copy (stream copy) which is extremely lightweight —
-it's just remuxing, not encoding.
+Assets are pre-transcoded into multiple renditions (resolution/codec combinations) by the
+transcode ladder. At playout time, the concat file is built using the rendition that
+matches the stream's encoding profile. The playout ffmpeg uses -c copy (stream copy)
+which is extremely lightweight — it's just remuxing, not encoding.
 
 The multicast output uses MPEG-TS container format with 1316-byte UDP packets (the
 standard MPEG-TS-over-UDP packet size: 7 x 188-byte TS packets).
@@ -23,7 +24,10 @@ import signal
 from typing import Dict, Optional
 from sqlalchemy.orm import Session
 from backend import config
-from backend.models import Stream, StreamStatus, StreamSourceType, PlaybackMode, AssetStatus
+from backend.models import (
+    Stream, StreamStatus, StreamSourceType, PlaybackMode,
+    AssetStatus, AssetRendition, RenditionStatus,
+)
 from backend.services.browser_manager import _detect_host_multicast_ip
 
 logger = logging.getLogger("stream_manager")
@@ -68,20 +72,63 @@ class StreamManager:
         """Check if a specific stream has a running ffmpeg process."""
         return stream_id in self._active
 
-    def _generate_concat_file(self, stream: Stream) -> str:
+    def _select_rendition_path(self, asset, target_resolution: str,
+                               target_codec: str, db: Session) -> str | None:
+        """Find the best rendition file for a given stream encoding profile.
+
+        Selection priority:
+          1. Exact match on resolution + codec
+          2. Same resolution, any codec (e.g. stream wants h265 but only h264 exists)
+          3. Fall back to asset.file_path (legacy single-file or first ready rendition)
+
+        Args:
+            asset: Asset ORM object
+            target_resolution: Stream's configured resolution (e.g. "1920x1080")
+            target_codec: Stream's configured codec ("h264" or "h265")
+            db: Active database session
+
+        Returns:
+            Filesystem path to the best matching rendition, or None if nothing usable
+        """
+        renditions = db.query(AssetRendition).filter(
+            AssetRendition.asset_id == asset.id,
+            AssetRendition.status == RenditionStatus.READY,
+        ).all()
+
+        if not renditions:
+            # No renditions yet (legacy asset) — use the old file_path
+            return asset.file_path
+
+        # Priority 1: exact match
+        for r in renditions:
+            if r.resolution == target_resolution and r.codec == target_codec:
+                return r.file_path
+
+        # Priority 2: same resolution, different codec
+        for r in renditions:
+            if r.resolution == target_resolution:
+                return r.file_path
+
+        # Priority 3: any ready rendition (prefer closest resolution)
+        # Fall back to asset.file_path which points to the first ready rendition
+        return asset.file_path
+
+    def _generate_concat_file(self, stream: Stream, db: Session) -> str:
         """
         Write an ffmpeg concat-demuxer playlist file from the stream's ordered items.
 
+        Selects the rendition matching the stream's encoding profile for each asset.
         The concat demuxer format is simply:
             file '/path/to/asset_1.mp4'
             file '/path/to/asset_2.mp4'
             ...
 
-        Only includes assets with READY status (successfully transcoded).
+        Only includes assets with READY status and a usable rendition file.
         Single quotes in file paths are escaped for the concat demuxer syntax.
 
         Args:
             stream: Stream ORM object with loaded .items relationship
+            db: Active database session for rendition lookups
 
         Returns:
             Filesystem path to the generated concat playlist file
@@ -89,9 +136,13 @@ class StreamManager:
         path = str(config.CONCAT_DIR / f"stream_{stream.id}_playlist.txt")
         with open(path, "w") as f:
             for item in sorted(stream.items, key=lambda i: i.position):
-                if item.asset.status == AssetStatus.READY:
+                if item.asset.status != AssetStatus.READY:
+                    continue
+                rendition_path = self._select_rendition_path(
+                    item.asset, stream.resolution, stream.codec, db)
+                if rendition_path:
                     # Escape single quotes in paths for ffmpeg concat demuxer format
-                    safe = item.asset.file_path.replace("'", "'\\''")
+                    safe = rendition_path.replace("'", "'\\''")
                     f.write(f"file '{safe}'\n")
         return path
 
@@ -174,7 +225,7 @@ class StreamManager:
             if not ready:
                 raise ValueError("No ready assets in the playlist")
 
-            concat_path = self._generate_concat_file(stream)
+            concat_path = self._generate_concat_file(stream, db)
             cmd = self._build_playout_cmd(concat_path, stream)
             logger.info("Starting stream %d: %s", stream_id, " ".join(cmd))
 

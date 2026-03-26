@@ -42,6 +42,7 @@ from typing import Dict, Optional
 from sqlalchemy.orm import Session
 from backend import config
 from backend.models import BrowserSource, Stream, StreamStatus, StreamSourceType, Presentation
+from backend.services.encoding_profiles import get_effective_bitrate, get_effective_gop_size
 
 logger = logging.getLogger("browser_manager")
 
@@ -240,6 +241,43 @@ class BrowserManager:
         logger.info("Container image built successfully")
         return True
 
+    def _get_container_encoding_env(self, stream: Stream) -> list:
+        """Build encoding-related env vars for a container from the stream's profile.
+
+        Reads per-stream encoding settings (resolution, codec, framerate, bitrate)
+        and returns them as `-e KEY=VALUE` pairs for the podman run command.
+        Also selects the appropriate encoder preset based on codec and source type.
+
+        Args:
+            stream: Stream ORM object with encoding columns populated
+
+        Returns:
+            List of ["-e", "KEY=VALUE", ...] strings for podman run
+        """
+        resolution = stream.resolution or "1920x1080"
+        codec = stream.codec or "h264"
+        framerate = stream.framerate or 30
+        bitrate = get_effective_bitrate(resolution, framerate, codec, stream.video_bitrate)
+        gop_size = get_effective_gop_size(framerate, stream.gop_size)
+
+        # Select preset: H.265 needs more time so we use "fast" instead of "ultrafast".
+        # For browser/presentation live capture, speed matters — use the fastest
+        # preset that still produces acceptable quality at the given codec.
+        if codec == "h265":
+            preset = "fast"
+        else:
+            preset = "ultrafast"
+
+        return [
+            "-e", f"RESOLUTION={resolution}",
+            "-e", f"FRAMERATE={framerate}",
+            "-e", f"VIDEO_CODEC={codec}",
+            "-e", f"VIDEO_BITRATE={bitrate}",
+            "-e", f"GOP_SIZE={gop_size}",
+            "-e", f"ENCODER_PRESET={preset}",
+            "-e", f"AUDIO_BITRATE={config.BROWSER_SOURCE_AUDIO_BITRATE}",
+        ]
+
     async def start_browser(self, stream_id: int, url: str, capture_audio: bool,
                             multicast_address: str, multicast_port: int) -> dict:
         """
@@ -247,6 +285,9 @@ class BrowserManager:
 
         The container runs the full stack defined in container/entrypoint.sh:
         Xvfb -> Firefox kiosk -> x11vnc -> websockify -> ffmpeg x11grab -> UDP multicast.
+
+        Encoding settings (resolution, codec, framerate, bitrate) are read from the
+        stream's per-stream encoding profile rather than global config.
 
         Key Podman flags:
           --network=host: Required for multicast — bridge networks don't forward multicast traffic
@@ -281,8 +322,6 @@ class BrowserManager:
         vnc_port = VNC_PORT_BASE + display_num
         novnc_port = NOVNC_PORT_BASE + display_num
         container_name = f"{CONTAINER_NAME_PREFIX}{stream_id}"
-        resolution = config.TRANSCODE_RESOLUTION
-        framerate = config.TRANSCODE_FRAMERATE
 
         # Remove any stale container with the same name left over from a crash or unclean shutdown
         await self._run_cmd(["sudo", "podman", "rm", "-f", container_name])
@@ -297,6 +336,17 @@ class BrowserManager:
             logger.warning("Could not detect host IP for multicast binding — "
                            "ffmpeg will rely on kernel routing table")
 
+        # Read per-stream encoding profile from the database
+        db: Session = self._db_factory()
+        try:
+            stream = db.query(Stream).filter(Stream.id == stream_id).first()
+            if not stream:
+                self._release_display(display_num)
+                raise ValueError(f"Stream {stream_id} not found")
+            encoding_env = self._get_container_encoding_env(stream)
+        finally:
+            db.close()
+
         # Build the podman run command with all environment variables the entrypoint.sh expects
         podman_cmd = [
             "sudo", "podman", "run",
@@ -305,8 +355,6 @@ class BrowserManager:
             "--network=host",              # Required: multicast doesn't work over bridge networks
             "--shm-size=512m",             # Required: Firefox crashes with default 64MB shm
             "-e", f"DISPLAY_NUM={display_num}",
-            "-e", f"RESOLUTION={resolution}",
-            "-e", f"FRAMERATE={framerate}",
             "-e", f"URL={url}",
             "-e", f"MULTICAST_ADDR={multicast_address}",
             "-e", f"MULTICAST_PORT={multicast_port}",
@@ -315,12 +363,7 @@ class BrowserManager:
             "-e", f"VNC_PORT={vnc_port}",
             "-e", f"NOVNC_PORT={novnc_port}",
             "-e", f"CAPTURE_AUDIO={'true' if capture_audio else 'false'}",
-            "-e", f"VIDEO_BITRATE={config.BROWSER_SOURCE_VIDEO_BITRATE}",
-            "-e", f"ENCODER_PRESET={config.BROWSER_SOURCE_VIDEO_PRESET}",
-            "-e", f"ENCODER_TUNE={config.BROWSER_SOURCE_VIDEO_TUNE}",
-            "-e", f"AUDIO_BITRATE={config.BROWSER_SOURCE_AUDIO_BITRATE}",
-            CONTAINER_IMAGE,
-        ]
+        ] + encoding_env + [CONTAINER_IMAGE]
 
         logger.info("Starting browser container: %s", " ".join(podman_cmd))
         rc, container_id, stderr = await self._run_cmd(podman_cmd)
@@ -406,11 +449,6 @@ class BrowserManager:
         vnc_port = VNC_PORT_BASE + display_num
         novnc_port = NOVNC_PORT_BASE + display_num
         container_name = f"{CONTAINER_NAME_PREFIX}{stream_id}"
-        # Presentation encoding at 720p to keep the encoder comfortably
-        # above real-time — 1080p with veryfast exceeds CPU budget on
-        # current hardware. Browser sources keep the global resolution.
-        resolution = "1280x720"
-        framerate = config.TRANSCODE_FRAMERATE
 
         # Remove any stale container with the same name
         await self._run_cmd(["sudo", "podman", "rm", "-f", container_name])
@@ -421,6 +459,17 @@ class BrowserManager:
         else:
             logger.warning("Could not detect host IP for multicast binding — "
                            "ffmpeg will rely on kernel routing table")
+
+        # Read per-stream encoding profile from the database
+        db: Session = self._db_factory()
+        try:
+            stream = db.query(Stream).filter(Stream.id == stream_id).first()
+            if not stream:
+                self._release_display(display_num)
+                raise ValueError(f"Stream {stream_id} not found")
+            encoding_env = self._get_container_encoding_env(stream)
+        finally:
+            db.close()
 
         # Determine the file extension so LibreOffice gets the correct filename
         # inside the container (it uses the extension to determine the file type)
@@ -436,8 +485,6 @@ class BrowserManager:
             # Bind-mount the presentation file read-only into the container
             "-v", f"{presentation_file_path}:{container_file}:ro",
             "-e", f"DISPLAY_NUM={display_num}",
-            "-e", f"RESOLUTION={resolution}",
-            "-e", f"FRAMERATE={framerate}",
             # SOURCE_MODE tells entrypoint.sh to launch LibreOffice instead of Firefox
             "-e", "SOURCE_MODE=presentation",
             "-e", f"PRESENTATION_FILE={container_file}",
@@ -448,15 +495,7 @@ class BrowserManager:
             "-e", f"VNC_PORT={vnc_port}",
             "-e", f"NOVNC_PORT={novnc_port}",
             "-e", f"CAPTURE_AUDIO={'true' if capture_audio else 'false'}",
-            # 720p presentations need far less bitrate than browser sources.
-            # 20Mbps CBR on static slides forces the encoder to pad at q=0-2,
-            # which paradoxically makes it slower than real-time. 6Mbps is
-            # ample for sharp text at 720p and lets the encoder run fast.
-            "-e", "VIDEO_BITRATE=6M",
-            "-e", "ENCODER_PRESET=ultrafast",
-            "-e", f"AUDIO_BITRATE={config.BROWSER_SOURCE_AUDIO_BITRATE}",
-            CONTAINER_IMAGE,
-        ]
+        ] + encoding_env + [CONTAINER_IMAGE]
 
         logger.info("Starting presentation container: %s", " ".join(podman_cmd))
         rc, container_id, stderr = await self._run_cmd(podman_cmd)
