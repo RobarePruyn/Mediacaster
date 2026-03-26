@@ -145,6 +145,19 @@ def create_stream(body: StreamCreate, db: Session = Depends(get_db),
     if not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Admin privileges required")
 
+    # Prevent two streams from sharing the same multicast address:port —
+    # two ffmpeg processes writing to the same group corrupt each other's output
+    conflict = db.query(Stream).filter(
+        Stream.multicast_address == body.multicast_address,
+        Stream.multicast_port == body.multicast_port,
+    ).first()
+    if conflict:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Multicast {body.multicast_address}:{body.multicast_port} "
+                   f"is already in use by stream '{conflict.name}'",
+        )
+
     source_type = StreamSourceType(body.source_type)
     stream = Stream(
         name=body.name,
@@ -214,6 +227,20 @@ def update_stream(stream_id: int, body: StreamUpdate, db: Session = Depends(get_
     if body.multicast_address is not None: stream.multicast_address = body.multicast_address
     if body.multicast_port is not None: stream.multicast_port = body.multicast_port
     if body.playback_mode is not None: stream.playback_mode = PlaybackMode(body.playback_mode)
+
+    # If multicast address or port changed, check for conflicts with other streams
+    conflict = db.query(Stream).filter(
+        Stream.multicast_address == stream.multicast_address,
+        Stream.multicast_port == stream.multicast_port,
+        Stream.id != stream.id,
+    ).first()
+    if conflict:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Multicast {stream.multicast_address}:{stream.multicast_port} "
+                   f"is already in use by stream '{conflict.name}'",
+        )
+
     db.commit()
     db.refresh(stream)
     return _to_response(stream)
