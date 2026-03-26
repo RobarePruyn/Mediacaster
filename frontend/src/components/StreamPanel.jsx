@@ -495,12 +495,18 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
               <h3>{isPresentation ? 'Live Presentation View' : 'Live Browser View (interactive)'}</h3>
             </div>
             {novncReady ? (
-              <iframe
-                src={novncUrl}
-                title={isPresentation ? 'Presentation Preview' : 'Browser Source'}
-                className="novnc-frame"
-                allow="clipboard-read; clipboard-write"
-              />
+              <div className="novnc-wrapper">
+                <iframe
+                  src={novncUrl}
+                  title={isPresentation ? 'Presentation Preview' : 'Browser Source'}
+                  className="novnc-frame"
+                  allow="clipboard-read; clipboard-write"
+                />
+                {/* Presentation streams are view-only — block all mouse/touch input
+                    so scrolls, clicks, and drags don't interfere with the slideshow.
+                    Slide control is done exclusively via the API buttons below. */}
+                {isPresentation && <div className="novnc-input-blocker" />}
+              </div>
             ) : (
               <div className="novnc-loading">
                 <div className="novnc-spinner" />

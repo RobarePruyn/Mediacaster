@@ -295,7 +295,11 @@ body { font-family: var(--font-body); font-size: 14px; line-height: 1.5; color: 
 /* The iframe loads vnc_embed.html which handles all internal scaling via
    scaleViewport=true. We just need to give it the right aspect ratio and
    prevent any overflow from the iframe's content. */
-.novnc-frame { width: 100%; aspect-ratio: 16/9; border: 1px solid var(--border); border-radius: var(--radius-sm); background: #000; margin-top: 8px; display: block; overflow: hidden; }
+.novnc-wrapper { position: relative; margin-top: 8px; }
+.novnc-frame { width: 100%; aspect-ratio: 16/9; border: 1px solid var(--border); border-radius: var(--radius-sm); background: #000; display: block; overflow: hidden; margin-top: 0; }
+/* Transparent overlay that blocks all mouse/touch input on presentation previews.
+   Prevents scroll wheel, clicks, and drags from reaching the VNC session. */
+.novnc-input-blocker { position: absolute; top: 0; left: 0; right: 0; bottom: 0; z-index: 2; cursor: default; }
 
 /* Loading placeholder shown while websockify starts up inside the container */
 .novnc-loading {
