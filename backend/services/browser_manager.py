@@ -406,7 +406,10 @@ class BrowserManager:
         vnc_port = VNC_PORT_BASE + display_num
         novnc_port = NOVNC_PORT_BASE + display_num
         container_name = f"{CONTAINER_NAME_PREFIX}{stream_id}"
-        resolution = config.TRANSCODE_RESOLUTION
+        # Presentation encoding at 720p to keep the encoder comfortably
+        # above real-time — 1080p with veryfast exceeds CPU budget on
+        # current hardware. Browser sources keep the global resolution.
+        resolution = "1280x720"
         framerate = config.TRANSCODE_FRAMERATE
 
         # Remove any stale container with the same name
