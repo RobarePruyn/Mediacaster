@@ -318,6 +318,15 @@ echo "[entrypoint] Starting ffmpeg capture → ${MULTICAST_URL}"
 BITRATE_NUM="${VIDEO_BITRATE%%[^0-9]*}"
 BUFSIZE="${BITRATE_NUM}M"
 
+# Calculate MPEG-TS mux rate ~15% above total stream bitrate.
+# This gives the muxer headroom for TS overhead (PAT/PMT tables, PCR stamps,
+# null stuffing packets) while keeping output pacing smooth and constant.
+# Audio bitrate (e.g. "128k") is negligible relative to video but included.
+AUDIO_NUM="${AUDIO_BITRATE%%[^0-9]*}"
+MUXRATE_KBPS=$(( (BITRATE_NUM * 1000 + AUDIO_NUM) * 115 / 100 ))
+MUXRATE="${MUXRATE_KBPS}k"
+echo "[entrypoint] Mux rate: ${MUXRATE} (video: ${VIDEO_BITRATE}, audio: ${AUDIO_BITRATE})"
+
 # Build the ffmpeg command as an array for proper argument quoting.
 # The pipeline: x11grab input → libx264 encode → AAC audio → MPEG-TS mux → UDP output
 FFMPEG_CMD=(
@@ -393,10 +402,11 @@ FFMPEG_CMD+=(
     -nal-hrd cbr
     # yuv420p is required for compatibility — many decoders reject yuv444p
     -pix_fmt yuv420p
-    # GOP size = frame rate → keyframe every 1 second for fast IPTV channel tune-in.
-    # Receivers must decode from a keyframe, so 1-second GOPs minimize channel-change
-    # latency at the cost of slightly higher bitrate (more I-frames).
-    -g "${FRAMERATE}"
+    # GOP size = half the frame rate → keyframe every 0.5 seconds.
+    # Over lossy UDP multicast, losing an I-frame freezes all receivers until
+    # the next one. Halving the GOP interval from 1s to 0.5s halves worst-case
+    # recovery time at a small bitrate cost (~5% more due to extra I-frames).
+    -g $(( FRAMERATE / 2 ))
     # Audio encoding: AAC at 48kHz stereo — standard for broadcast MPEG-TS
     -c:a aac
     -b:a "${AUDIO_BITRATE}"
@@ -408,6 +418,16 @@ FFMPEG_CMD+=(
     # good practice).
     -f mpegts
     -mpegts_transport_stream_id 1
+    # muxrate paces MPEG-TS output at a constant packet rate instead of
+    # letting ffmpeg dump packets in bursts after each frame encodes. Without
+    # this, a complex I-frame produces a burst of packets that can overflow
+    # edge switch buffers, causing simultaneous packet loss on all receivers
+    # (visible as brief freezes in VLC and macroblocking on hardware decoders).
+    # Set ~15% above total stream bitrate (video + audio + TS overhead).
+    -muxrate "${MUXRATE}"
+    # flush_packets forces the muxer to write each packet immediately rather
+    # than buffering internally, further reducing burstiness.
+    -flush_packets 1
     "${MULTICAST_URL}"
 )
 

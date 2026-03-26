@@ -1,0 +1,593 @@
+{
+	"info": {
+		"name": "Mediacaster API",
+		"description": "Complete API collection for the Mediacaster MPEG-TS multicast playout system.\n\nSet the `base_url` variable to your server (e.g. https://10.2.0.15).\nLogin first — the token is auto-saved to the `token` variable for all subsequent requests.",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"variable": [
+		{
+			"key": "base_url",
+			"value": "https://10.2.0.15",
+			"type": "string"
+		},
+		{
+			"key": "token",
+			"value": "",
+			"type": "string"
+		}
+	],
+	"auth": {
+		"type": "bearer",
+		"bearer": [
+			{
+				"key": "token",
+				"value": "{{token}}",
+				"type": "string"
+			}
+		]
+	},
+	"item": [
+		{
+			"name": "Auth",
+			"item": [
+				{
+					"name": "Login",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 200) {",
+									"    var json = pm.response.json();",
+									"    pm.collectionVariables.set('token', json.access_token);",
+									"    pm.test('Token saved', function () {",
+									"        pm.expect(json.access_token).to.be.a('string');",
+									"    });",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"auth": { "type": "noauth" },
+						"method": "POST",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"username\": \"admin\",\n    \"password\": \"changeme\"\n}"
+						},
+						"url": { "raw": "{{base_url}}/api/auth/login", "host": ["{{base_url}}"], "path": ["api", "auth", "login"] },
+						"description": "Authenticate and receive a JWT token. The token is automatically saved to the `token` collection variable for use in all other requests."
+					}
+				},
+				{
+					"name": "Get Current User",
+					"request": {
+						"method": "GET",
+						"url": { "raw": "{{base_url}}/api/auth/me", "host": ["{{base_url}}"], "path": ["api", "auth", "me"] },
+						"description": "Get the currently authenticated user's profile."
+					}
+				},
+				{
+					"name": "Change Password",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"current_password\": \"oldpassword\",\n    \"new_password\": \"newpassword123\"\n}"
+						},
+						"url": { "raw": "{{base_url}}/api/auth/change-password", "host": ["{{base_url}}"], "path": ["api", "auth", "change-password"] },
+						"description": "Change the current user's password. New password must be 8-72 characters."
+					}
+				},
+				{
+					"name": "List Users (admin)",
+					"request": {
+						"method": "GET",
+						"url": { "raw": "{{base_url}}/api/auth/users", "host": ["{{base_url}}"], "path": ["api", "auth", "users"] },
+						"description": "List all user accounts. Admin only."
+					}
+				},
+				{
+					"name": "Create User (admin)",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"username\": \"newuser\",\n    \"is_admin\": false\n}"
+						},
+						"url": { "raw": "{{base_url}}/api/auth/users", "host": ["{{base_url}}"], "path": ["api", "auth", "users"] },
+						"description": "Create a new user with an auto-generated password. The password is returned once in the response — share it securely with the user."
+					}
+				},
+				{
+					"name": "Update User (admin)",
+					"request": {
+						"method": "PUT",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"is_active\": true,\n    \"is_admin\": false\n}"
+						},
+						"url": { "raw": "{{base_url}}/api/auth/users/2", "host": ["{{base_url}}"], "path": ["api", "auth", "users", "2"] },
+						"description": "Update a user's active/admin status. Partial updates supported."
+					}
+				},
+				{
+					"name": "Reset User Password (admin)",
+					"request": {
+						"method": "POST",
+						"url": { "raw": "{{base_url}}/api/auth/users/2/reset-password", "host": ["{{base_url}}"], "path": ["api", "auth", "users", "2", "reset-password"] },
+						"description": "Generate a new random password for a user. The new password is returned once."
+					}
+				},
+				{
+					"name": "Delete User (admin)",
+					"request": {
+						"method": "DELETE",
+						"url": { "raw": "{{base_url}}/api/auth/users/2", "host": ["{{base_url}}"], "path": ["api", "auth", "users", "2"] },
+						"description": "Delete a user account. Cannot delete yourself."
+					}
+				},
+				{
+					"name": "OIDC Config",
+					"request": {
+						"auth": { "type": "noauth" },
+						"method": "GET",
+						"url": { "raw": "{{base_url}}/api/auth/oidc/config", "host": ["{{base_url}}"], "path": ["api", "auth", "oidc", "config"] },
+						"description": "Get public OIDC configuration (enabled state and display name). No auth required."
+					}
+				},
+				{
+					"name": "OIDC Authorize",
+					"request": {
+						"auth": { "type": "noauth" },
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/api/auth/oidc/authorize?redirect_uri=https://example.com/callback",
+							"host": ["{{base_url}}"],
+							"path": ["api", "auth", "oidc", "authorize"],
+							"query": [{ "key": "redirect_uri", "value": "https://example.com/callback" }]
+						},
+						"description": "Get OIDC authorization URL for browser redirect."
+					}
+				},
+				{
+					"name": "OIDC Callback",
+					"request": {
+						"auth": { "type": "noauth" },
+						"method": "POST",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"code\": \"auth_code_from_idp\",\n    \"state\": \"state_value\",\n    \"redirect_uri\": \"https://example.com/callback\"\n}"
+						},
+						"url": { "raw": "{{base_url}}/api/auth/oidc/callback", "host": ["{{base_url}}"], "path": ["api", "auth", "oidc", "callback"] },
+						"description": "Exchange OIDC authorization code for an application JWT."
+					}
+				}
+			]
+		},
+		{
+			"name": "Assets",
+			"item": [
+				{
+					"name": "Upload Asset",
+					"request": {
+						"method": "POST",
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{ "key": "file", "type": "file", "src": "" }
+							]
+						},
+						"url": { "raw": "{{base_url}}/api/assets/upload", "host": ["{{base_url}}"], "path": ["api", "assets", "upload"] },
+						"description": "Upload a media file (video, image, or audio). Starts background transcoding to H.264/AAC. Returns immediately in UPLOADING status."
+					}
+				},
+				{
+					"name": "List Assets",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/api/assets",
+							"host": ["{{base_url}}"],
+							"path": ["api", "assets"],
+							"query": [
+								{ "key": "folder_id", "value": "", "disabled": true, "description": "Filter by folder ID. Use 0 for unfiled." },
+								{ "key": "search", "value": "", "disabled": true, "description": "Search by display name" },
+								{ "key": "sort", "value": "date", "disabled": true, "description": "name, date, size, or type" },
+								{ "key": "sort_dir", "value": "desc", "disabled": true, "description": "asc or desc" }
+							]
+						},
+						"description": "List assets with optional folder, search, and sort filters. Admins see all; users see own + shared folder assets."
+					}
+				},
+				{
+					"name": "Get Asset",
+					"request": {
+						"method": "GET",
+						"url": { "raw": "{{base_url}}/api/assets/1", "host": ["{{base_url}}"], "path": ["api", "assets", "1"] },
+						"description": "Get a single asset's details."
+					}
+				},
+				{
+					"name": "Rename Asset",
+					"request": {
+						"method": "PUT",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"display_name\": \"My Video\"\n}"
+						},
+						"url": { "raw": "{{base_url}}/api/assets/1/rename", "host": ["{{base_url}}"], "path": ["api", "assets", "1", "rename"] },
+						"description": "Rename an asset's display name."
+					}
+				},
+				{
+					"name": "Delete Asset",
+					"request": {
+						"method": "DELETE",
+						"url": { "raw": "{{base_url}}/api/assets/1", "host": ["{{base_url}}"], "path": ["api", "assets", "1"] },
+						"description": "Delete an asset and its files from disk."
+					}
+				},
+				{
+					"name": "Get Storage Info",
+					"request": {
+						"method": "GET",
+						"url": { "raw": "{{base_url}}/api/assets/storage", "host": ["{{base_url}}"], "path": ["api", "assets", "storage"] },
+						"description": "Get disk usage stats for the media storage directory."
+					}
+				},
+				{
+					"name": "Get Thumbnail (no auth)",
+					"request": {
+						"auth": { "type": "noauth" },
+						"method": "GET",
+						"url": { "raw": "{{base_url}}/api/assets/1/thumbnail", "host": ["{{base_url}}"], "path": ["api", "assets", "1", "thumbnail"] },
+						"description": "Serve thumbnail image. No auth required (img tags can't send JWT)."
+					}
+				},
+				{
+					"name": "Get Preview (no auth)",
+					"request": {
+						"auth": { "type": "noauth" },
+						"method": "GET",
+						"url": { "raw": "{{base_url}}/api/assets/1/preview", "host": ["{{base_url}}"], "path": ["api", "assets", "1", "preview"] },
+						"description": "Serve transcoded video preview. Only serves READY assets. No auth required."
+					}
+				}
+			]
+		},
+		{
+			"name": "Folders",
+			"item": [
+				{
+					"name": "Create Folder",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"name\": \"My Folder\",\n    \"parent_id\": null\n}"
+						},
+						"url": { "raw": "{{base_url}}/api/folders", "host": ["{{base_url}}"], "path": ["api", "folders"] },
+						"description": "Create a new folder. Set parent_id for nested folders."
+					}
+				},
+				{
+					"name": "List Folders",
+					"request": {
+						"method": "GET",
+						"url": { "raw": "{{base_url}}/api/folders", "host": ["{{base_url}}"], "path": ["api", "folders"] },
+						"description": "List all folders visible to the current user (flat list)."
+					}
+				},
+				{
+					"name": "Get Folder Tree",
+					"request": {
+						"method": "GET",
+						"url": { "raw": "{{base_url}}/api/folders/tree", "host": ["{{base_url}}"], "path": ["api", "folders", "tree"] },
+						"description": "Get the complete folder hierarchy as a nested tree structure."
+					}
+				},
+				{
+					"name": "Get Folder",
+					"request": {
+						"method": "GET",
+						"url": { "raw": "{{base_url}}/api/folders/1", "host": ["{{base_url}}"], "path": ["api", "folders", "1"] },
+						"description": "Get a single folder's details."
+					}
+				},
+				{
+					"name": "Update Folder",
+					"request": {
+						"method": "PUT",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"name\": \"Renamed Folder\"\n}"
+						},
+						"url": { "raw": "{{base_url}}/api/folders/1", "host": ["{{base_url}}"], "path": ["api", "folders", "1"] },
+						"description": "Rename or move a folder. Partial updates supported."
+					}
+				},
+				{
+					"name": "Set Folder Sharing (admin)",
+					"request": {
+						"method": "PUT",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"is_shared\": true,\n    \"share_mode\": \"read_only\"\n}"
+						},
+						"url": { "raw": "{{base_url}}/api/folders/1/share", "host": ["{{base_url}}"], "path": ["api", "folders", "1", "share"] },
+						"description": "Set folder sharing options. Admin only. share_mode: 'read_only' or 'read_write'."
+					}
+				},
+				{
+					"name": "Delete Folder",
+					"request": {
+						"method": "DELETE",
+						"url": { "raw": "{{base_url}}/api/folders/1", "host": ["{{base_url}}"], "path": ["api", "folders", "1"] },
+						"description": "Delete a folder. Assets become unfiled. Child folders are cascade-deleted."
+					}
+				},
+				{
+					"name": "Move Assets",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"asset_ids\": [1, 2, 3],\n    \"folder_id\": 1\n}"
+						},
+						"url": { "raw": "{{base_url}}/api/folders/move-assets", "host": ["{{base_url}}"], "path": ["api", "folders", "move-assets"] },
+						"description": "Move assets into a folder. Set folder_id to null to unfile them."
+					}
+				}
+			]
+		},
+		{
+			"name": "Streams",
+			"item": [
+				{
+					"name": "Create Stream (admin)",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"name\": \"New Stream\",\n    \"multicast_address\": \"239.1.1.1\",\n    \"multicast_port\": 5000,\n    \"playback_mode\": \"loop\",\n    \"source_type\": \"playlist\"\n}"
+						},
+						"url": { "raw": "{{base_url}}/api/streams", "host": ["{{base_url}}"], "path": ["api", "streams"] },
+						"description": "Create a new stream. Admin only. source_type: 'playlist', 'browser', or 'presentation'."
+					}
+				},
+				{
+					"name": "List Streams",
+					"request": {
+						"method": "GET",
+						"url": { "raw": "{{base_url}}/api/streams", "host": ["{{base_url}}"], "path": ["api", "streams"] },
+						"description": "List streams. Admins see all; users see only their assigned streams."
+					}
+				},
+				{
+					"name": "Get Stream",
+					"request": {
+						"method": "GET",
+						"url": { "raw": "{{base_url}}/api/streams/1", "host": ["{{base_url}}"], "path": ["api", "streams", "1"] },
+						"description": "Get a single stream's full details including playlist items and browser source config."
+					}
+				},
+				{
+					"name": "Update Stream (admin)",
+					"request": {
+						"method": "PUT",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"name\": \"Updated Stream Name\",\n    \"multicast_address\": \"239.1.1.2\",\n    \"multicast_port\": 5001\n}"
+						},
+						"url": { "raw": "{{base_url}}/api/streams/1", "host": ["{{base_url}}"], "path": ["api", "streams", "1"] },
+						"description": "Update stream configuration. Partial updates supported. Restart required for multicast changes."
+					}
+				},
+				{
+					"name": "Delete Stream (admin)",
+					"request": {
+						"method": "DELETE",
+						"url": { "raw": "{{base_url}}/api/streams/1", "host": ["{{base_url}}"], "path": ["api", "streams", "1"] },
+						"description": "Delete a stream. Stops it first if running. Cascades to delete playlist items, browser source, and user assignments."
+					}
+				},
+				{
+					"name": "Assign Users (admin)",
+					"request": {
+						"method": "PUT",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"user_ids\": [2, 3]\n}"
+						},
+						"url": { "raw": "{{base_url}}/api/streams/1/assign", "host": ["{{base_url}}"], "path": ["api", "streams", "1", "assign"] },
+						"description": "Replace the set of users assigned to a stream. Admin only."
+					}
+				},
+				{
+					"name": "Update Browser/Presentation Config (admin)",
+					"request": {
+						"method": "PUT",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"url\": \"https://example.com\",\n    \"capture_audio\": false,\n    \"presentation_id\": null\n}"
+						},
+						"url": { "raw": "{{base_url}}/api/streams/1/browser", "host": ["{{base_url}}"], "path": ["api", "streams", "1", "browser"] },
+						"description": "Update browser or presentation source configuration. For presentation streams, set presentation_id and url to 'about:blank'."
+					}
+				},
+				{
+					"name": "Add Playlist Item",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"asset_id\": 1,\n    \"position\": null\n}"
+						},
+						"url": { "raw": "{{base_url}}/api/streams/1/items", "host": ["{{base_url}}"], "path": ["api", "streams", "1", "items"] },
+						"description": "Add an asset to a playlist stream. Position null appends to end. Non-admins can only add their own assets."
+					}
+				},
+				{
+					"name": "Reorder Playlist",
+					"request": {
+						"method": "PUT",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"asset_ids\": [3, 1, 2]\n}"
+						},
+						"url": { "raw": "{{base_url}}/api/streams/1/items/reorder", "host": ["{{base_url}}"], "path": ["api", "streams", "1", "items", "reorder"] },
+						"description": "Reorder playlist by providing the complete ordered list of asset IDs."
+					}
+				},
+				{
+					"name": "Remove Playlist Item",
+					"request": {
+						"method": "DELETE",
+						"url": { "raw": "{{base_url}}/api/streams/1/items/1", "host": ["{{base_url}}"], "path": ["api", "streams", "1", "items", "1"] },
+						"description": "Remove a playlist item by item ID (not asset ID)."
+					}
+				},
+				{
+					"name": "Start Stream",
+					"request": {
+						"method": "POST",
+						"url": { "raw": "{{base_url}}/api/streams/1/start", "host": ["{{base_url}}"], "path": ["api", "streams", "1", "start"] },
+						"description": "Start a stream. Dispatches to the appropriate manager based on source_type (playlist, browser, or presentation)."
+					}
+				},
+				{
+					"name": "Stop Stream",
+					"request": {
+						"method": "POST",
+						"url": { "raw": "{{base_url}}/api/streams/1/stop", "host": ["{{base_url}}"], "path": ["api", "streams", "1", "stop"] },
+						"description": "Stop a running stream."
+					}
+				},
+				{
+					"name": "Restart Stream",
+					"request": {
+						"method": "POST",
+						"url": { "raw": "{{base_url}}/api/streams/1/restart", "host": ["{{base_url}}"], "path": ["api", "streams", "1", "restart"] },
+						"description": "Stop and immediately restart a stream."
+					}
+				},
+				{
+					"name": "Get Stream Status",
+					"request": {
+						"method": "GET",
+						"url": { "raw": "{{base_url}}/api/streams/1/status", "host": ["{{base_url}}"], "path": ["api", "streams", "1", "status"] },
+						"description": "Get a stream's runtime status including DB status and live runtime info (PID, container state)."
+					}
+				},
+				{
+					"name": "Slide Control (presentation)",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"action\": \"next\"\n}"
+						},
+						"url": { "raw": "{{base_url}}/api/streams/1/slide-control", "host": ["{{base_url}}"], "path": ["api", "streams", "1", "slide-control"] },
+						"description": "Send slide navigation command to a running presentation stream. Actions: 'next' (Right), 'prev' (Left), 'first' (Home), 'last' (End)."
+					}
+				}
+			]
+		},
+		{
+			"name": "Presentations",
+			"item": [
+				{
+					"name": "Upload Presentation",
+					"request": {
+						"method": "POST",
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{ "key": "file", "type": "file", "src": "" }
+							]
+						},
+						"url": { "raw": "{{base_url}}/api/presentations/upload", "host": ["{{base_url}}"], "path": ["api", "presentations", "upload"] },
+						"description": "Upload a slideshow file (PPTX, PPT, ODP, PDF). Stored as-is — LibreOffice renders it natively in the container. Marked READY immediately."
+					}
+				},
+				{
+					"name": "List Presentations",
+					"request": {
+						"method": "GET",
+						"url": { "raw": "{{base_url}}/api/presentations/", "host": ["{{base_url}}"], "path": ["api", "presentations", ""] },
+						"description": "List all presentations. Admins see all; users see only their own."
+					}
+				},
+				{
+					"name": "Get Presentation",
+					"request": {
+						"method": "GET",
+						"url": { "raw": "{{base_url}}/api/presentations/1", "host": ["{{base_url}}"], "path": ["api", "presentations", "1"] },
+						"description": "Get a single presentation's details."
+					}
+				},
+				{
+					"name": "Delete Presentation",
+					"request": {
+						"method": "DELETE",
+						"url": { "raw": "{{base_url}}/api/presentations/1", "host": ["{{base_url}}"], "path": ["api", "presentations", "1"] },
+						"description": "Delete a presentation and its file from disk. Linked browser sources will have presentation_id set to NULL."
+					}
+				}
+			]
+		},
+		{
+			"name": "Settings & Monitoring",
+			"item": [
+				{
+					"name": "Get Settings",
+					"request": {
+						"method": "GET",
+						"url": { "raw": "{{base_url}}/api/settings", "host": ["{{base_url}}"], "path": ["api", "settings"] },
+						"description": "Get all server settings (13 runtime-adjustable values)."
+					}
+				},
+				{
+					"name": "Update Settings (admin)",
+					"request": {
+						"method": "PUT",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"settings\": {\n        \"transcode_resolution\": \"1920x1080\",\n        \"multicast_ttl\": \"16\"\n    }\n}"
+						},
+						"url": { "raw": "{{base_url}}/api/settings", "host": ["{{base_url}}"], "path": ["api", "settings"] },
+						"description": "Batch-update server settings. Only provided keys are changed. Admin only."
+					}
+				},
+				{
+					"name": "Get Monitoring (admin)",
+					"request": {
+						"method": "GET",
+						"url": { "raw": "{{base_url}}/api/monitoring", "host": ["{{base_url}}"], "path": ["api", "monitoring"] },
+						"description": "Get system resource metrics: CPU, RAM, network, per-stream breakdown, and capacity estimates. Admin only."
+					}
+				}
+			]
+		}
+	]
+}
