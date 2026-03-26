@@ -449,13 +449,10 @@ class BrowserManager:
             "-e", f"NOVNC_PORT={novnc_port}",
             "-e", f"CAPTURE_AUDIO={'true' if capture_audio else 'false'}",
             "-e", f"VIDEO_BITRATE={config.BROWSER_SOURCE_VIDEO_BITRATE}",
-            # Presentations need a slower preset than browser sources:
-            # "ultrafast" forces Constrained Baseline (no B-frames) and
-            # breaks CBR, causing macroblocking. "veryfast" is the lightest
-            # preset that still enables Main profile (B-frames + proper
-            # rate control) while staying comfortably above real-time.
-            "-e", "ENCODER_PRESET=veryfast",
-            "-e", "ENCODER_TUNE=stillimage",
+            # "ultrafast" forces Constrained Baseline (no B-frames, broken CBR).
+            # "superfast" is the lightest preset that doesn't break CBR rate
+            # control while keeping encoding well above real-time speed.
+            "-e", "ENCODER_PRESET=superfast",
             "-e", f"AUDIO_BITRATE={config.BROWSER_SOURCE_AUDIO_BITRATE}",
             CONTAINER_IMAGE,
         ]
