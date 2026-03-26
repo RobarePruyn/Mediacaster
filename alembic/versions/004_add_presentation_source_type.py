@@ -15,13 +15,11 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    # Add 'presentation' to the streamsourcetype PostgreSQL enum.
-    # PostgreSQL requires ALTER TYPE ... ADD VALUE to run outside a transaction.
-    # Commit Alembic's auto-opened transaction first, then re-open for the rest.
-    op.execute("COMMIT")
-    op.execute("ALTER TYPE streamsourcetype ADD VALUE IF NOT EXISTS 'presentation'")
-
-    # Add file_path column to presentations for storing the raw upload path
+    # Add file_path column to presentations for storing the raw upload path.
+    #
+    # Note: The StreamSourceType enum is stored as VARCHAR (not a PostgreSQL
+    # native enum), so no ALTER TYPE is needed — the new 'presentation' value
+    # is handled at the SQLAlchemy/Python level automatically.
     op.add_column(
         "presentations",
         sa.Column("file_path", sa.String(1024), nullable=True),
