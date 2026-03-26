@@ -708,7 +708,6 @@ export default function AssetLibrary({ assets, isLoading, onRefresh, selectedStr
               {presentations.map(pres => {
                 const statusBadge = {
                   uploading:  { cls: 'badge-info',    label: 'Uploading' },
-                  processing: { cls: 'badge-warning', label: 'Converting' },
                   ready:      { cls: 'badge-success', label: 'Ready' },
                   error:      { cls: 'badge-error',   label: 'Error' },
                 }[pres.status] || { cls: 'badge-error', label: pres.status };
@@ -719,19 +718,8 @@ export default function AssetLibrary({ assets, isLoading, onRefresh, selectedStr
                       <span className="presentation-name">{pres.name}</span>
                       <div className="presentation-meta">
                         <span className={`badge badge-sm ${statusBadge.cls}`}>{statusBadge.label}</span>
-                        {pres.status === 'ready' && (
-                          <span className="mono">{pres.slide_count} slide{pres.slide_count !== 1 ? 's' : ''}</span>
-                        )}
-                        {pres.status === 'processing' && (
-                          <div className="transcode-progress" style={{ flex: 1 }}>
-                            <div className="transcode-progress-bar">
-                              <div className="transcode-progress-fill pres-converting" />
-                            </div>
-                            <span className="processing-text mono">Converting...</span>
-                          </div>
-                        )}
                         {pres.status === 'error' && (
-                          <span className="error-text" title={pres.error_message}>Conversion failed</span>
+                          <span className="error-text" title={pres.error_message}>Upload failed</span>
                         )}
                       </div>
                     </div>

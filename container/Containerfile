@@ -1,9 +1,13 @@
 # ==========================================================================
-# Browser Source Container — Containerfile
+# Capture Source Container — Containerfile
 # ==========================================================================
-# Builds the container image used for browser source capture streams.
-# Each running instance renders a URL in a headless Firefox, captures the
-# virtual display via ffmpeg x11grab, and outputs MPEG-TS over UDP multicast.
+# Builds the container image used for browser and presentation capture streams.
+# Each running instance renders content on a virtual display, captures it via
+# ffmpeg x11grab, and outputs MPEG-TS over UDP multicast.
+#
+# Two modes (set via SOURCE_MODE env var):
+#   browser:      Firefox kiosk mode renders a URL
+#   presentation: LibreOffice Impress renders a slideshow natively
 #
 # Why AlmaLinux 9?
 #   AlmaLinux 10 dropped the X11 server stack entirely (Wayland-only), but
@@ -11,8 +15,8 @@
 #   requires an X11 display. AL9 still ships Xvfb and the full X11 toolchain.
 #
 # Runtime pipeline per container:
-#   Xvfb (virtual framebuffer) → Firefox (kiosk mode) → x11vnc (VNC server)
-#   → websockify/noVNC (browser-based VNC preview) → ffmpeg x11grab (capture
+#   Xvfb (virtual framebuffer) → Firefox or LibreOffice Impress → x11vnc
+#   → websockify/noVNC (browser-based preview) → ffmpeg x11grab (capture
 #   + encode to H.264/AAC → MPEG-TS UDP multicast output)
 # ==========================================================================
 
@@ -30,6 +34,9 @@ RUN dnf install -y epel-release && \
     dnf install -y \
         firefox \
         ffmpeg \
+        # LibreOffice Impress for native presentation rendering in slideshow mode.
+        # Presentations are opened with --show to run the slideshow directly.
+        libreoffice-impress \
         xorg-x11-server-Xvfb \
         x11vnc \
         xdotool \
@@ -88,7 +95,11 @@ COPY vnc_embed.html /opt/novnc/vnc_embed.html
 ENV DISPLAY_NUM=50 \
     RESOLUTION=1920x1080 \
     FRAMERATE=30 \
+    # SOURCE_MODE: "browser" (Firefox + URL) or "presentation" (LibreOffice Impress)
+    SOURCE_MODE=browser \
     URL=about:blank \
+    # PRESENTATION_FILE: path inside the container to the mounted slideshow file
+    PRESENTATION_FILE="" \
     MULTICAST_ADDR=239.1.1.1 \
     MULTICAST_PORT=5000 \
     # TTL 16 is sufficient for site-local multicast; typical campus/building

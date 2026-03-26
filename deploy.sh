@@ -90,7 +90,8 @@ dnf install -y \
     ffmpeg ffmpeg-devel \
     python3 python3-pip python3-devel \
     postgresql-server postgresql \
-    nginx gcc make git curl
+    nginx gcc make git curl \
+    poppler-utils
 
 # LibreOffice is needed for presentation-to-slide conversion (headless mode).
 # On AL10+ it's not in the standard repos, so we install from the official RPM bundle.

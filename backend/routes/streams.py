@@ -22,9 +22,10 @@ RBAC model:
 - Regular users can only see/manage streams they've been assigned to.
 - Playlist item operations enforce asset ownership: non-admins can only add their own assets.
 
-Two source types:
+Three source types:
 - PLAYLIST: ffmpeg concat loop of transcoded assets → MPEG-TS multicast
 - BROWSER: Podman container with Xvfb + Firefox + ffmpeg x11grab → MPEG-TS multicast
+- PRESENTATION: Podman container with Xvfb + LibreOffice Impress --show + ffmpeg x11grab → MPEG-TS multicast
 """
 
 import logging
@@ -156,7 +157,10 @@ def create_stream(body: StreamCreate, db: Session = Depends(get_db),
     # Flush to get stream.id assigned before creating the child BrowserSource
     db.flush()
 
-    if source_type == StreamSourceType.BROWSER:
+    # Browser and Presentation streams both need a BrowserSource record
+    # to track display/VNC/noVNC port assignments and (for presentations)
+    # the linked presentation_id
+    if source_type in (StreamSourceType.BROWSER, StreamSourceType.PRESENTATION):
         db.add(BrowserSource(stream_id=stream.id))
 
     db.commit()
@@ -231,11 +235,11 @@ async def delete_stream(stream_id: int, request: Request, db: Session = Depends(
         raise HTTPException(status_code=404, detail="Stream not found")
 
     # Gracefully stop any running source before deleting
-    if stream.source_type == StreamSourceType.BROWSER:
+    if stream.source_type in (StreamSourceType.BROWSER, StreamSourceType.PRESENTATION):
         bm = request.app.state.browser_manager
         if bm.is_active(stream_id):
             await bm.stop_browser(stream_id)
-    else:
+    elif stream.source_type == StreamSourceType.PLAYLIST:
         sm = request.app.state.stream_manager
         if sm.is_stream_active(stream_id):
             await sm.stop_stream(stream_id)
@@ -297,17 +301,17 @@ def update_browser_config(stream_id: int, body: BrowserSourceConfig,
     if not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Admin privileges required")
     stream = db.query(Stream).filter(Stream.id == stream_id).first()
-    if not stream or stream.source_type != StreamSourceType.BROWSER:
-        raise HTTPException(status_code=400, detail="Not a browser source stream")
-    # Determine the URL: if a presentation is linked, auto-generate the viewer URL
-    url = body.url
+    if not stream or stream.source_type not in (StreamSourceType.BROWSER, StreamSourceType.PRESENTATION):
+        raise HTTPException(status_code=400, detail="Not a browser or presentation source stream")
+
+    url = body.url or "about:blank"
     presentation_id = body.presentation_id
+
+    # Validate presentation exists if one is specified
     if presentation_id is not None:
         pres = db.query(Presentation).filter(Presentation.id == presentation_id).first()
         if not pres:
             raise HTTPException(status_code=404, detail="Presentation not found")
-        # Override the URL to point at the slide viewer page
-        url = f"/api/presentations/{presentation_id}/viewer"
 
     if not stream.browser_source:
         # Lazy-create BrowserSource for streams that predate this feature
@@ -340,7 +344,7 @@ def add_item(stream_id: int, body: StreamItemCreate, db: Session = Depends(get_d
     if not stream:
         raise HTTPException(status_code=404, detail="Stream not found")
     if stream.source_type != StreamSourceType.PLAYLIST:
-        raise HTTPException(status_code=400, detail="Browser streams don't use playlists")
+        raise HTTPException(status_code=400, detail="Only playlist streams support playlist items")
     if not _user_can_manage(current_user, stream):
         raise HTTPException(status_code=403, detail="Not assigned to this stream")
 
@@ -448,6 +452,32 @@ async def start_stream(stream_id: int, request: Request, db: Session = Depends(g
         stream.ffmpeg_pid = result.get("ffmpeg_pid")
         db.commit()
         return {"message": f"Browser stream {stream_id} started", "status": "running", **result}
+
+    elif stream.source_type == StreamSourceType.PRESENTATION:
+        bm = request.app.state.browser_manager
+        # Presentation streams need a linked presentation with a file on disk
+        if not stream.browser_source or not stream.browser_source.presentation_id:
+            raise HTTPException(status_code=400, detail="Select a presentation first")
+        presentation = db.query(Presentation).filter(
+            Presentation.id == stream.browser_source.presentation_id
+        ).first()
+        if not presentation or not presentation.file_path:
+            raise HTTPException(status_code=400, detail="Presentation file not available")
+        if presentation.status != PresentationStatus.READY:
+            raise HTTPException(status_code=400,
+                                detail=f"Presentation is not ready (status: {presentation.status.value})")
+        try:
+            result = await bm.start_presentation(
+                stream_id, presentation.file_path,
+                stream.browser_source.capture_audio,
+                stream.multicast_address, stream.multicast_port,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        stream.status = StreamStatus.RUNNING
+        db.commit()
+        return {"message": f"Presentation stream {stream_id} started", "status": "running", **result}
+
     else:
         # Playlist stream — stream_manager handles status updates internally
         sm = request.app.state.stream_manager
@@ -473,7 +503,7 @@ async def stop_stream(stream_id: int, request: Request, db: Session = Depends(ge
     if not _user_can_manage(current_user, stream):
         raise HTTPException(status_code=403, detail="Not assigned to this stream")
 
-    if stream.source_type == StreamSourceType.BROWSER:
+    if stream.source_type in (StreamSourceType.BROWSER, StreamSourceType.PRESENTATION):
         bm = request.app.state.browser_manager
         await bm.stop_browser(stream_id)
         # Browser manager doesn't update DB status, so we do it here
@@ -500,18 +530,30 @@ async def restart_stream(stream_id: int, request: Request, db: Session = Depends
     if not _user_can_manage(current_user, stream):
         raise HTTPException(status_code=403, detail="Not assigned to this stream")
 
-    if stream.source_type == StreamSourceType.BROWSER:
+    if stream.source_type in (StreamSourceType.BROWSER, StreamSourceType.PRESENTATION):
         bm = request.app.state.browser_manager
         await bm.stop_browser(stream_id)
         try:
-            await bm.start_browser(
-                stream_id, stream.browser_source.url,
-                stream.browser_source.capture_audio,
-                stream.multicast_address, stream.multicast_port,
-            )
+            if stream.source_type == StreamSourceType.PRESENTATION:
+                # Re-resolve the presentation file for restart
+                presentation = db.query(Presentation).filter(
+                    Presentation.id == stream.browser_source.presentation_id
+                ).first()
+                if not presentation or not presentation.file_path:
+                    raise ValueError("Presentation file not available")
+                await bm.start_presentation(
+                    stream_id, presentation.file_path,
+                    stream.browser_source.capture_audio,
+                    stream.multicast_address, stream.multicast_port,
+                )
+            else:
+                await bm.start_browser(
+                    stream_id, stream.browser_source.url,
+                    stream.browser_source.capture_audio,
+                    stream.multicast_address, stream.multicast_port,
+                )
             stream.status = StreamStatus.RUNNING
         except ValueError as e:
-            # Mark as ERROR so the frontend shows the failure
             stream.status = StreamStatus.ERROR
             db.commit()
             raise HTTPException(status_code=400, detail=str(e))
@@ -541,10 +583,61 @@ def stream_status(stream_id: int, request: Request, db: Session = Depends(get_db
     if not _user_can_manage(current_user, stream):
         raise HTTPException(status_code=403, detail="Not assigned to this stream")
 
-    if stream.source_type == StreamSourceType.BROWSER:
+    if stream.source_type in (StreamSourceType.BROWSER, StreamSourceType.PRESENTATION):
         bm = request.app.state.browser_manager
         return {"stream_id": stream_id, "db_status": stream.status.value,
                 "runtime": bm.get_status(stream_id)}
     else:
         return {"stream_id": stream_id, "db_status": stream.status.value,
                 "runtime": request.app.state.stream_manager.get_status(stream_id)}
+
+
+# ---------------------------------------------------------------------------
+# Presentation slide control (admin or assigned users)
+# ---------------------------------------------------------------------------
+
+@router.post("/{stream_id}/slide-control")
+async def slide_control(stream_id: int, body: dict, request: Request,
+                        db: Session = Depends(get_db),
+                        current_user: User = Depends(get_current_user)):
+    """Send a slide navigation command to a running presentation stream.
+
+    Sends xdotool key events to the LibreOffice Impress instance inside the
+    container. Supported actions map to LibreOffice slideshow keyboard shortcuts:
+
+      next:  Right arrow — advance to next slide/animation
+      prev:  Left arrow — go back one slide/animation
+      first: Home — jump to first slide
+      last:  End — jump to last slide
+
+    Only works on PRESENTATION source type streams that are currently running.
+    """
+    stream = db.query(Stream).filter(Stream.id == stream_id).first()
+    if not stream:
+        raise HTTPException(status_code=404, detail="Stream not found")
+    if not _user_can_manage(current_user, stream):
+        raise HTTPException(status_code=403, detail="Not assigned to this stream")
+    if stream.source_type != StreamSourceType.PRESENTATION:
+        raise HTTPException(status_code=400, detail="Not a presentation stream")
+    if stream.status != StreamStatus.RUNNING:
+        raise HTTPException(status_code=400, detail="Stream is not running")
+
+    # Map action names to X11 keysym names for xdotool
+    action = body.get("action")
+    key_map = {
+        "next": "Right",
+        "prev": "Left",
+        "first": "Home",
+        "last": "End",
+    }
+    key = key_map.get(action)
+    if not key:
+        raise HTTPException(status_code=400,
+                            detail=f"Invalid action '{action}'. Use: next, prev, first, last")
+
+    bm = request.app.state.browser_manager
+    success = await bm.send_key(stream_id, key)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to send key command to container")
+
+    return {"message": f"Slide control '{action}' sent", "action": action}

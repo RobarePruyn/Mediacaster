@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 # ==========================================================================
-# Browser Source Container Entrypoint
+# Capture Source Container Entrypoint
 # ==========================================================================
 # Launches the full capture pipeline inside the container:
-#   Xvfb → Firefox (kiosk) → x11vnc → websockify/noVNC → ffmpeg x11grab
+#   Xvfb → (Firefox or LibreOffice Impress) → x11vnc → websockify/noVNC
+#   → ffmpeg x11grab
+#
+# SOURCE_MODE controls which application renders content:
+#   browser:      Firefox in kiosk mode loads a URL
+#   presentation: LibreOffice Impress runs a slideshow natively
 #
 # All config comes from environment variables set by the browser_manager
 # service when it calls `podman run --env ...`. See Containerfile for defaults.
@@ -104,18 +109,66 @@ if [[ "${CAPTURE_AUDIO}" == "true" ]]; then
     export PULSE_SINK
 fi
 
-# ---- 3. Start Firefox in kiosk mode ----
-echo "[entrypoint] Starting Firefox: ${URL}"
+# ---- 3. Start content application (Firefox or LibreOffice Impress) ----
+W=$(echo "${RESOLUTION}" | cut -d'x' -f1)
+H=$(echo "${RESOLUTION}" | cut -d'x' -f2)
 
-# Create a disposable profile directory so Firefox starts clean every time
-# (no session restore dialogs, no cached state from previous runs)
-PROFILE_DIR="/tmp/firefox_profile"
-mkdir -p "${PROFILE_DIR}"
+if [[ "${SOURCE_MODE}" == "presentation" ]]; then
+    # ---- Presentation mode: LibreOffice Impress in slideshow ----
+    echo "[entrypoint] Starting LibreOffice Impress slideshow: ${PRESENTATION_FILE}"
 
-# user.js overrides are applied at profile load time and take priority
-# over prefs.js. This is the only reliable way to suppress all first-run
-# UI and disable features that interfere with headless kiosk operation.
-cat > "${PROFILE_DIR}/user.js" << 'PREFS'
+    if [[ -z "${PRESENTATION_FILE}" || ! -f "${PRESENTATION_FILE}" ]]; then
+        echo "[entrypoint] ERROR: PRESENTATION_FILE not set or not found: ${PRESENTATION_FILE}"
+        exit 1
+    fi
+
+    # LibreOffice --show opens the file directly in presentation/slideshow mode.
+    # The presentation fills the screen and responds to keyboard navigation
+    # (Right/Left/Space/Escape) which we send via xdotool from the API.
+    libreoffice \
+        --norestore \
+        --nofirststartwizard \
+        --show "${PRESENTATION_FILE}" &
+    PIDS+=($!)
+    echo "[entrypoint] LibreOffice PID: ${PIDS[-1]}"
+
+    # LibreOffice is slower to start than Firefox — wait for the slideshow
+    # window to appear. It creates an "Impress" class window for the slideshow.
+    sleep 6
+
+    echo "[entrypoint] Confirming Impress fills display (${RESOLUTION})"
+    for attempt in 1 2 3 4 5; do
+        # LibreOffice slideshow window uses class "libreoffice" or the app name
+        WINDOW_ID=$(xdotool search --name "" 2>/dev/null | head -1 || true)
+        if [[ -n "${WINDOW_ID}" ]]; then
+            xdotool windowmove "${WINDOW_ID}" 0 0
+            xdotool windowsize "${WINDOW_ID}" "${W}" "${H}"
+            xdotool windowactivate "${WINDOW_ID}"
+            xdotool key super+Up 2>/dev/null || true
+            # Press F5 as a fallback to ensure slideshow mode is active
+            # (--show should handle this, but belt-and-suspenders)
+            sleep 1
+            xdotool key F5 2>/dev/null || true
+            echo "[entrypoint] Window ${WINDOW_ID} maximized to ${W}x${H}"
+            break
+        fi
+        echo "[entrypoint] Waiting for Impress window (attempt ${attempt}/5)..."
+        sleep 2
+    done
+
+else
+    # ---- Browser mode: Firefox in kiosk mode ----
+    echo "[entrypoint] Starting Firefox: ${URL}"
+
+    # Create a disposable profile directory so Firefox starts clean every time
+    # (no session restore dialogs, no cached state from previous runs)
+    PROFILE_DIR="/tmp/firefox_profile"
+    mkdir -p "${PROFILE_DIR}"
+
+    # user.js overrides are applied at profile load time and take priority
+    # over prefs.js. This is the only reliable way to suppress all first-run
+    # UI and disable features that interfere with headless kiosk operation.
+    cat > "${PROFILE_DIR}/user.js" << 'PREFS'
 // Disable first-run, updates, telemetry
 user_pref("browser.shell.checkDefaultBrowser", false);
 user_pref("datareporting.policy.dataSubmissionEnabled", false);
@@ -153,61 +206,58 @@ user_pref("full-screen-api.approval-required", false);
 user_pref("dom.disable_window_move_resize", false);
 PREFS
 
-# Append resolution-dependent prefs (can't use variables in a quoted heredoc).
-# These set Firefox's initial window geometry to match the Xvfb framebuffer
-# so it starts at the right size before openbox maximizes it.
-W=$(echo "${RESOLUTION}" | cut -d'x' -f1)
-H=$(echo "${RESOLUTION}" | cut -d'x' -f2)
-cat >> "${PROFILE_DIR}/user.js" << GEOM
+    # Append resolution-dependent prefs (can't use variables in a quoted heredoc).
+    # These set Firefox's initial window geometry to match the Xvfb framebuffer
+    # so it starts at the right size before openbox maximizes it.
+    cat >> "${PROFILE_DIR}/user.js" << GEOM
 // Initial window geometry — match the Xvfb framebuffer resolution
 user_pref("browser.window.width", ${W});
 user_pref("browser.window.height", ${H});
 GEOM
 
-# --no-remote prevents Firefox from trying to reuse an existing instance.
-# --kiosk renders the page in chromeless fullscreen (no address bar, no tabs).
-firefox \
-    --no-remote \
-    --profile "${PROFILE_DIR}" \
-    --kiosk "${URL}" &
-PIDS+=($!)
-echo "[entrypoint] Firefox PID: ${PIDS[-1]}"
+    # --no-remote prevents Firefox from trying to reuse an existing instance.
+    # --kiosk renders the page in chromeless fullscreen (no address bar, no tabs).
+    firefox \
+        --no-remote \
+        --profile "${PROFILE_DIR}" \
+        --kiosk "${URL}" &
+    PIDS+=($!)
+    echo "[entrypoint] Firefox PID: ${PIDS[-1]}"
 
-# Give Firefox time to create its window and render the initial page.
-# 4 seconds is conservative but necessary — Firefox on Xvfb without GPU
-# acceleration can be slow to initialize.
-sleep 4
+    # Give Firefox time to create its window and render the initial page.
+    # 4 seconds is conservative but necessary — Firefox on Xvfb without GPU
+    # acceleration can be slow to initialize.
+    sleep 4
 
-# Ensure Firefox fills the entire virtual display.
-# openbox's rc.xml config above forces all windows to maximize, but we
-# also use xdotool as a belt-and-suspenders measure to explicitly resize
-# and re-maximize the Firefox window after it's had time to render.
-echo "[entrypoint] Confirming Firefox fills display (${RESOLUTION})"
-W=$(echo "${RESOLUTION}" | cut -d'x' -f1)
-H=$(echo "${RESOLUTION}" | cut -d'x' -f2)
+    # Ensure Firefox fills the entire virtual display.
+    # openbox's rc.xml config above forces all windows to maximize, but we
+    # also use xdotool as a belt-and-suspenders measure to explicitly resize
+    # and re-maximize the Firefox window after it's had time to render.
+    echo "[entrypoint] Confirming Firefox fills display (${RESOLUTION})"
 
-# Retry up to 5 times — Firefox may take a while to create its window,
-# especially on first launch without GPU acceleration.
-for attempt in 1 2 3 4 5; do
-    # Search by WM_CLASS (more reliable than window name, which changes
-    # with every page navigation). Firefox's WM_CLASS is always "Navigator".
-    # || true prevents set -e + pipefail from killing the script when
-    # xdotool returns non-zero (no windows found yet)
-    WINDOW_ID=$(xdotool search --class Navigator 2>/dev/null | head -1 || true)
-    if [[ -n "${WINDOW_ID}" ]]; then
-        # Move to origin, resize to full framebuffer, then tell openbox
-        # to maximize (handles any WM chrome/offset openbox might add)
-        xdotool windowmove "${WINDOW_ID}" 0 0
-        xdotool windowsize "${WINDOW_ID}" "${W}" "${H}"
-        xdotool windowactivate "${WINDOW_ID}"
-        # wmctrl-style maximize via xdotool key (openbox listens to these)
-        xdotool key super+Up 2>/dev/null || true
-        echo "[entrypoint] Window ${WINDOW_ID} maximized to ${W}x${H}"
-        break
-    fi
-    echo "[entrypoint] Waiting for Firefox window (attempt ${attempt}/5)..."
-    sleep 2
-done
+    # Retry up to 5 times — Firefox may take a while to create its window,
+    # especially on first launch without GPU acceleration.
+    for attempt in 1 2 3 4 5; do
+        # Search by WM_CLASS (more reliable than window name, which changes
+        # with every page navigation). Firefox's WM_CLASS is always "Navigator".
+        # || true prevents set -e + pipefail from killing the script when
+        # xdotool returns non-zero (no windows found yet)
+        WINDOW_ID=$(xdotool search --class Navigator 2>/dev/null | head -1 || true)
+        if [[ -n "${WINDOW_ID}" ]]; then
+            # Move to origin, resize to full framebuffer, then tell openbox
+            # to maximize (handles any WM chrome/offset openbox might add)
+            xdotool windowmove "${WINDOW_ID}" 0 0
+            xdotool windowsize "${WINDOW_ID}" "${W}" "${H}"
+            xdotool windowactivate "${WINDOW_ID}"
+            # wmctrl-style maximize via xdotool key (openbox listens to these)
+            xdotool key super+Up 2>/dev/null || true
+            echo "[entrypoint] Window ${WINDOW_ID} maximized to ${W}x${H}"
+            break
+        fi
+        echo "[entrypoint] Waiting for Firefox window (attempt ${attempt}/5)..."
+        sleep 2
+    done
+fi
 
 # ---- 4. Start x11vnc (VNC server for interactive control) ----
 # x11vnc attaches to the existing Xvfb display (unlike Xvnc which creates
@@ -368,7 +418,7 @@ FFMPEG_CMD+=(
 PIDS+=($!)
 echo "[entrypoint] ffmpeg PID: ${PIDS[-1]}"
 
-echo "[entrypoint] Browser source fully started"
+echo "[entrypoint] Capture source fully started (mode: ${SOURCE_MODE})"
 echo "[entrypoint]   Display:   ${DISPLAY}"
 echo "[entrypoint]   VNC:       port ${VNC_PORT}"
 echo "[entrypoint]   noVNC:     port ${NOVNC_PORT}"

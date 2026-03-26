@@ -1,17 +1,27 @@
 """
-Browser Source Manager — Podman container-based virtual browser capture for multicast streaming.
+Capture Source Manager — Podman container-based virtual display capture for multicast streaming.
 
-Each browser source runs as an isolated Podman container based on AlmaLinux 9,
+Manages two container-based source types that share the same container image and
+capture pipeline (Xvfb + x11grab + ffmpeg → MPEG-TS UDP multicast):
+
+  BROWSER:      Firefox kiosk mode renders a web URL
+  PRESENTATION: LibreOffice Impress renders a slideshow natively (preserving
+                animations, transitions, and embedded media)
+
+Each source runs as an isolated Podman container based on AlmaLinux 9,
 providing the X11 stack (Xvfb, x11vnc, xdotool) that AlmaLinux 10 dropped
 (AL10 is Wayland-only, but we need X11 for reliable screen capture via x11grab).
 
 Container per source provides:
     - Xvfb virtual display at the configured resolution
-    - Firefox in kiosk mode pointed at the configured URL
+    - Firefox (browser mode) or LibreOffice Impress --show (presentation mode)
     - x11vnc for interactive VNC control
-    - websockify/noVNC for web-based interaction (embedded in the UI via iframe)
+    - websockify/noVNC for web-based preview (embedded in the UI via iframe)
     - ffmpeg x11grab capturing the virtual display into MPEG-TS UDP multicast
-    - Optional PulseAudio audio capture from the browser
+    - Optional PulseAudio audio capture
+
+Presentation slide control is done via xdotool key events sent through
+``podman exec`` — LibreOffice Impress responds to Left/Right/Home/End/Escape.
 
 Uses --network=host so the container can output directly to multicast addresses
 without NAT or port-mapping complications. This is required because multicast
@@ -31,7 +41,7 @@ import subprocess
 from typing import Dict, Optional
 from sqlalchemy.orm import Session
 from backend import config
-from backend.models import BrowserSource, Stream, StreamStatus
+from backend.models import BrowserSource, Stream, StreamStatus, StreamSourceType, Presentation
 
 logger = logging.getLogger("browser_manager")
 
@@ -354,6 +364,177 @@ class BrowserManager:
             "novnc_port": novnc_port,
         }
 
+    async def start_presentation(self, stream_id: int, presentation_file_path: str,
+                                  capture_audio: bool, multicast_address: str,
+                                  multicast_port: int) -> dict:
+        """
+        Launch a Podman container for presentation capture and multicast output.
+
+        Similar to start_browser(), but sets SOURCE_MODE=presentation and mounts
+        the slideshow file (PPTX/ODP/PDF) into the container. The entrypoint.sh
+        launches LibreOffice Impress with --show instead of Firefox.
+
+        The presentation file is bind-mounted read-only at /tmp/presentation inside
+        the container. LibreOffice opens it in slideshow mode on the Xvfb display.
+
+        Args:
+            stream_id: Database ID of the stream
+            presentation_file_path: Absolute path to the slideshow file on the host
+            capture_audio: Whether to enable PulseAudio capture (for embedded audio)
+            multicast_address: Destination multicast group (e.g. "239.1.1.1")
+            multicast_port: Destination UDP port
+
+        Returns:
+            Dict with container_id, display, vnc_port, novnc_port
+
+        Raises:
+            ValueError: If the file doesn't exist, image is unavailable, or container fails
+        """
+        # Validate the presentation file exists on the host
+        if not os.path.isfile(presentation_file_path):
+            raise ValueError(f"Presentation file not found: {presentation_file_path}")
+
+        # Stop any existing container for this stream
+        if stream_id in self._active:
+            await self.stop_browser(stream_id)
+
+        if not await self.ensure_image_built():
+            raise ValueError("Capture source container image not available. "
+                             "Check logs for build errors.")
+
+        display_num = self._allocate_display()
+        vnc_port = VNC_PORT_BASE + display_num
+        novnc_port = NOVNC_PORT_BASE + display_num
+        container_name = f"{CONTAINER_NAME_PREFIX}{stream_id}"
+        resolution = config.TRANSCODE_RESOLUTION
+        framerate = config.TRANSCODE_FRAMERATE
+
+        # Remove any stale container with the same name
+        await self._run_cmd(["sudo", "podman", "rm", "-f", container_name])
+
+        host_multicast_ip = _detect_host_multicast_ip()
+        if host_multicast_ip:
+            logger.info("Multicast interface binding: localaddr=%s", host_multicast_ip)
+        else:
+            logger.warning("Could not detect host IP for multicast binding — "
+                           "ffmpeg will rely on kernel routing table")
+
+        # Determine the file extension so LibreOffice gets the correct filename
+        # inside the container (it uses the extension to determine the file type)
+        file_ext = os.path.splitext(presentation_file_path)[1]
+        container_file = f"/tmp/presentation{file_ext}"
+
+        podman_cmd = [
+            "sudo", "podman", "run",
+            "--detach",
+            "--name", container_name,
+            "--network=host",
+            "--shm-size=512m",
+            # Bind-mount the presentation file read-only into the container
+            "-v", f"{presentation_file_path}:{container_file}:ro",
+            "-e", f"DISPLAY_NUM={display_num}",
+            "-e", f"RESOLUTION={resolution}",
+            "-e", f"FRAMERATE={framerate}",
+            # SOURCE_MODE tells entrypoint.sh to launch LibreOffice instead of Firefox
+            "-e", "SOURCE_MODE=presentation",
+            "-e", f"PRESENTATION_FILE={container_file}",
+            "-e", f"MULTICAST_ADDR={multicast_address}",
+            "-e", f"MULTICAST_PORT={multicast_port}",
+            "-e", f"MULTICAST_TTL={config.MULTICAST_TTL}",
+            "-e", f"MULTICAST_IFACE_ADDR={host_multicast_ip}",
+            "-e", f"VNC_PORT={vnc_port}",
+            "-e", f"NOVNC_PORT={novnc_port}",
+            "-e", f"CAPTURE_AUDIO={'true' if capture_audio else 'false'}",
+            "-e", f"VIDEO_BITRATE={config.BROWSER_SOURCE_VIDEO_BITRATE}",
+            "-e", f"ENCODER_PRESET={config.BROWSER_SOURCE_VIDEO_PRESET}",
+            "-e", f"ENCODER_TUNE={config.BROWSER_SOURCE_VIDEO_TUNE}",
+            "-e", f"AUDIO_BITRATE={config.BROWSER_SOURCE_AUDIO_BITRATE}",
+            CONTAINER_IMAGE,
+        ]
+
+        logger.info("Starting presentation container: %s", " ".join(podman_cmd))
+        rc, container_id, stderr = await self._run_cmd(podman_cmd)
+
+        if rc != 0:
+            self._release_display(display_num)
+            raise ValueError(f"Container failed to start: {stderr}")
+
+        container_id = container_id[:12]
+        managed = ManagedBrowser(stream_id, display_num, container_id)
+        self._active[stream_id] = managed
+
+        # Persist port assignments to DB via the stream's browser_source record
+        # (presentation streams reuse the BrowserSource table for port tracking)
+        db: Session = self._db_factory()
+        try:
+            browser = db.query(BrowserSource).filter(
+                BrowserSource.stream_id == stream_id
+            ).first()
+            if browser:
+                browser.display_number = display_num
+                browser.vnc_port = vnc_port
+                browser.novnc_port = novnc_port
+            db.commit()
+        finally:
+            db.close()
+
+        asyncio.create_task(self._watch_container(managed))
+
+        logger.info(
+            "Presentation source started: stream=%d container=%s display=:%d vnc=%d novnc=%d file=%s",
+            stream_id, container_id, display_num, vnc_port, novnc_port, presentation_file_path,
+        )
+
+        return {
+            "container_id": container_id,
+            "display": f":{display_num}",
+            "vnc_port": vnc_port,
+            "novnc_port": novnc_port,
+        }
+
+    async def send_key(self, stream_id: int, key: str) -> bool:
+        """
+        Send a keyboard event to a running container via xdotool.
+
+        Used to control LibreOffice Impress slideshow navigation from the API.
+        The key name must be a valid X11 keysym (e.g. Right, Left, Home, End, Escape).
+
+        Args:
+            stream_id: Database ID of the stream
+            key: X11 keysym name to send (e.g. "Right", "Left", "Home", "End", "Escape")
+
+        Returns:
+            True if the key was sent successfully, False otherwise
+        """
+        managed = self._active.get(stream_id)
+        if not managed:
+            logger.warning("send_key called for inactive stream %d", stream_id)
+            return False
+
+        # Whitelist of allowed key names to prevent command injection
+        allowed_keys = {"Right", "Left", "Home", "End", "Escape", "space", "Return",
+                        "Page_Up", "Page_Down", "Up", "Down"}
+        if key not in allowed_keys:
+            logger.warning("Rejected disallowed key '%s' for stream %d", key, stream_id)
+            return False
+
+        # xdotool needs the DISPLAY variable to target the correct Xvfb instance
+        display = f":{managed.display_number}"
+        rc, stdout, stderr = await self._run_cmd([
+            "sudo", "podman", "exec",
+            "-e", f"DISPLAY={display}",
+            managed.container_name,
+            "xdotool", "key", key,
+        ])
+
+        if rc != 0:
+            logger.warning("xdotool key send failed for stream %d: %s", stream_id, stderr)
+            return False
+
+        logger.debug("Sent key '%s' to stream %d container %s",
+                     key, stream_id, managed.container_name)
+        return True
+
     async def stop_browser(self, stream_id: int):
         """
         Stop and remove the Podman container for a browser source.
@@ -523,38 +704,66 @@ class BrowserManager:
 
     async def restore_sessions(self):
         """
-        Restore browser sources that were marked as RUNNING before a service restart.
+        Restore container-based sources that were marked as RUNNING before a service restart.
 
-        On startup, queries the DB for any streams with source_type=BROWSER and
-        status=RUNNING, then attempts to relaunch their containers. This handles
-        the case where the systemd service was restarted but the streams should
-        continue. If a container fails to start, the stream is marked as ERROR.
+        On startup, queries the DB for any streams with source_type BROWSER or
+        PRESENTATION and status=RUNNING, then attempts to relaunch their containers.
+        This handles the case where the systemd service was restarted but the streams
+        should continue. If a container fails to start, the stream is marked as ERROR.
         """
         db: Session = self._db_factory()
         try:
-            from backend.models import StreamSourceType
-            browser_streams = db.query(Stream).filter(
-                Stream.source_type == StreamSourceType.BROWSER,
+            # Find all container-based streams that should be running
+            container_streams = db.query(Stream).filter(
+                Stream.source_type.in_([
+                    StreamSourceType.BROWSER,
+                    StreamSourceType.PRESENTATION,
+                ]),
                 Stream.status == StreamStatus.RUNNING,
             ).all()
 
-            for stream in browser_streams:
-                if stream.browser_source and stream.browser_source.url:
-                    logger.info("Restoring browser source for stream %d: %s",
-                                stream.id, stream.browser_source.url)
-                    try:
-                        await self.start_browser(
-                            stream.id,
-                            stream.browser_source.url,
-                            stream.browser_source.capture_audio,
-                            stream.multicast_address,
-                            stream.multicast_port,
-                        )
-                        stream.status = StreamStatus.RUNNING
-                    except Exception as exc:
-                        logger.error("Failed to restore browser stream %d: %s",
-                                     stream.id, exc)
-                        stream.status = StreamStatus.ERROR
+            for stream in container_streams:
+                try:
+                    if stream.source_type == StreamSourceType.PRESENTATION:
+                        # Presentation streams need the file path from the linked presentation
+                        presentation = None
+                        if stream.browser_source and stream.browser_source.presentation_id:
+                            presentation = db.query(Presentation).filter(
+                                Presentation.id == stream.browser_source.presentation_id
+                            ).first()
+                        if presentation and presentation.file_path:
+                            logger.info("Restoring presentation source for stream %d: %s",
+                                        stream.id, presentation.file_path)
+                            await self.start_presentation(
+                                stream.id,
+                                presentation.file_path,
+                                stream.browser_source.capture_audio if stream.browser_source else False,
+                                stream.multicast_address,
+                                stream.multicast_port,
+                            )
+                            stream.status = StreamStatus.RUNNING
+                        else:
+                            logger.error("Cannot restore presentation stream %d: no file path",
+                                         stream.id)
+                            stream.status = StreamStatus.ERROR
+                    elif stream.source_type == StreamSourceType.BROWSER:
+                        if stream.browser_source and stream.browser_source.url:
+                            logger.info("Restoring browser source for stream %d: %s",
+                                        stream.id, stream.browser_source.url)
+                            await self.start_browser(
+                                stream.id,
+                                stream.browser_source.url,
+                                stream.browser_source.capture_audio,
+                                stream.multicast_address,
+                                stream.multicast_port,
+                            )
+                            stream.status = StreamStatus.RUNNING
+                        else:
+                            logger.error("Cannot restore browser stream %d: no URL", stream.id)
+                            stream.status = StreamStatus.ERROR
+                except Exception as exc:
+                    logger.error("Failed to restore stream %d: %s", stream.id, exc)
+                    stream.status = StreamStatus.ERROR
             db.commit()
         finally:
             db.close()

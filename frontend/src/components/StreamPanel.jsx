@@ -1,16 +1,18 @@
 /**
  * StreamPanel.jsx — Stream management panel for the Dashboard view.
  *
- * Handles both stream source types:
+ * Handles all three stream source types:
  *   - Playlist streams: ffmpeg concat demuxer → MPEG-TS UDP multicast
  *   - Browser source streams: Podman container with Xvfb + Firefox + ffmpeg x11grab → multicast
+ *   - Presentation streams: Podman container with Xvfb + LibreOffice Impress + ffmpeg x11grab → multicast
  *
  * Features:
  *   - Stream tab bar with status dot indicators
- *   - Admin-only stream creation (playlist or browser type selector)
+ *   - Admin-only stream creation (playlist, browser, or presentation type selector)
  *   - Multicast output configuration (address, port, playback mode)
  *   - Browser source URL/audio configuration
- *   - noVNC iframe for interactive browser preview (when container is running)
+ *   - Presentation source: presentation picker + slide navigation controls
+ *   - noVNC iframe for interactive preview (browser and presentation streams)
  *   - Transport controls (Start/Stop/Restart) with live status polling
  *   - Playlist management: reorder items (up/down), remove items
  *
@@ -26,7 +28,7 @@ import {
   createStream, updateStream, deleteStream, updateBrowserConfig,
   removePlaylistItem, reorderPlaylist,
   startStream, stopStream, restartStream, getStreamStatus,
-  listPresentations, navigateSlide,
+  listPresentations, slideControl,
 } from '../api';
 
 export default function StreamPanel({ streams, selectedStreamId, onSelectStream, assets, isLoading, onRefresh, isAdmin }) {
@@ -62,8 +64,11 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
 
   /** The currently selected stream object (derived from the streams array) */
   const currentStream = streams.find(s => s.id === selectedStreamId);
-  /** Convenience flag: true if the selected stream is a browser source type */
+  /** Convenience flags for source type checks */
   const isBrowser = currentStream?.source_type === 'browser';
+  const isPresentation = currentStream?.source_type === 'presentation';
+  /** True for source types that use a container (browser or presentation) */
+  const isContainerBased = isBrowser || isPresentation;
 
   /**
    * Polls the stream status endpoint every 2 seconds.
@@ -94,27 +99,27 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
         multicast_port: String(currentStream.multicast_port),
         playback_mode: currentStream.playback_mode,
       });
-      // Also sync browser source config if this is a browser-type stream
+      // Sync browser/presentation source config for container-based streams
       if (currentStream.browser_source) {
         setBrowserUrl(currentStream.browser_source.url || '');
         setBrowserAudio(currentStream.browser_source.capture_audio || false);
-        // Determine if this browser source is linked to a presentation
         const presId = currentStream.browser_source.presentation_id;
         setSelectedPresentationId(presId || null);
-        setBrowserSourceMode(presId ? 'presentation' : 'url');
+        // For presentation streams, always default to presentation mode
+        setBrowserSourceMode(currentStream.source_type === 'presentation' ? 'presentation' : (presId ? 'presentation' : 'url'));
       }
     }
     // Reset dirty flag when switching streams
     setPlaylistDirty(false);
   }, [selectedStreamId]);
 
-  /** Load available presentations when entering browser config edit mode */
+  /** Load available presentations when entering config edit mode for container-based streams */
   useEffect(() => {
-    if (editingBrowser) {
+    if (editingBrowser || isPresentation) {
       listPresentations().then(data => setPresentations(data.presentations || []))
         .catch(() => setPresentations([]));
     }
-  }, [editingBrowser]);
+  }, [editingBrowser, isPresentation]);
 
   // ─── CRUD Operations ────────────────────────────────────────────────────────
 
@@ -125,8 +130,9 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
   const handleCreate = async () => {
     setCreating(true); setErrorMsg('');
     try {
+      const defaultNames = { playlist: 'New Stream', browser: 'Browser Source', presentation: 'Presentation' };
       const newStream = await createStream({
-        name: newSourceType === 'browser' ? 'Browser Source' : 'New Stream',
+        name: defaultNames[newSourceType] || 'New Stream',
         multicast_address: '239.1.1.1', multicast_port: 5000,
         playback_mode: 'loop', source_type: newSourceType,
       });
@@ -146,12 +152,13 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
     } catch (e) { setErrorMsg(e.message); }
   };
 
-  /** Saves the browser source configuration (URL, audio capture, optional presentation link). */
+  /** Saves the browser/presentation source configuration. */
   const handleSaveBrowser = async () => {
     if (!selectedStreamId) return; setErrorMsg('');
     try {
-      const presId = browserSourceMode === 'presentation' ? selectedPresentationId : null;
-      const url = browserSourceMode === 'presentation' ? 'about:blank' : browserUrl;
+      // Presentation streams always pass the selected presentation ID
+      const presId = isPresentation ? selectedPresentationId : null;
+      const url = isPresentation ? 'about:blank' : browserUrl;
       await updateBrowserConfig(selectedStreamId, url, browserAudio, presId);
       setEditingBrowser(false); onRefresh();
     } catch (e) { setErrorMsg(e.message); }
@@ -215,11 +222,14 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
   /**
    * Determines whether the Start button should be enabled:
    *   - Browser streams: need a valid URL configured (not the default about:blank)
+   *   - Presentation streams: need a presentation linked
    *   - Playlist streams: need at least one ready (fully transcoded) asset
    */
   const canStart = isBrowser
     ? (currentStream?.browser_source?.url && currentStream.browser_source.url !== 'about:blank')
-    : hasReadyItems;
+    : isPresentation
+      ? !!currentStream?.browser_source?.presentation_id
+      : hasReadyItems;
 
   /**
    * Constructs the noVNC URL for the browser source preview iframe.
@@ -248,6 +258,7 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
               onChange={e => setNewSourceType(e.target.value)}>
               <option value="playlist">Playlist</option>
               <option value="browser">Browser</option>
+              <option value="presentation">Presentation</option>
             </select>
             <button className="btn btn-sm btn-accent" onClick={handleCreate} disabled={creating}>
               + New
@@ -264,7 +275,7 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
               className={`stream-tab ${s.id === selectedStreamId ? 'active' : ''}`}
               onClick={() => onSelectStream(s.id)}>
               <span className={`status-dot status-${s.status}`} />
-              {s.source_type === 'browser' ? '🌐 ' : ''}{s.name}
+              {s.source_type === 'browser' ? '🌐 ' : s.source_type === 'presentation' ? '📊 ' : ''}{s.name}
             </button>
           ))}
         </div>
@@ -307,8 +318,8 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
                 <div className="form-group form-group-sm"><label>Port</label>
                   <input type="number" value={form.multicast_port} onChange={e => setForm({...form, multicast_port: e.target.value})} min="1024" max="65535" /></div>
               </div>
-              {/* Playback mode is only relevant for playlist streams (browser streams are always continuous) */}
-              {!isBrowser && (
+              {/* Playback mode is only relevant for playlist streams (container streams are continuous) */}
+              {!isContainerBased && (
                 <div className="form-row">
                   <div className="form-group"><label>Playback Mode</label>
                     <select value={form.playback_mode} onChange={e => setForm({...form, playback_mode: e.target.value})}>
@@ -321,12 +332,12 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
           ) : (
             <div className="config-display">
               <div className="config-value"><span className="config-label">Type</span>
-                <span className={`badge badge-sm ${isBrowser ? 'badge-info' : 'badge-success'}`}>
-                  {isBrowser ? 'Browser Source' : 'Playlist'}
+                <span className={`badge badge-sm ${isContainerBased ? 'badge-info' : 'badge-success'}`}>
+                  {isBrowser ? 'Browser Source' : isPresentation ? 'Presentation' : 'Playlist'}
                 </span></div>
               <div className="config-value"><span className="config-label">Destination</span>
                 <span className="mono config-addr">udp://{currentStream.multicast_address}:{currentStream.multicast_port}</span></div>
-              {!isBrowser && (
+              {!isContainerBased && (
                 <div className="config-value"><span className="config-label">Mode</span>
                   <span>{currentStream.playback_mode === 'loop' ? 'Loop' : 'One-shot'}</span></div>
               )}
@@ -350,47 +361,11 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
             </div>
             {editingBrowser ? (
               <div className="config-form">
-                {/* Source mode toggle: manual URL or presentation */}
                 <div className="form-row">
-                  <div className="form-group"><label>Source Mode</label>
-                    <select value={browserSourceMode}
-                      onChange={e => setBrowserSourceMode(e.target.value)}>
-                      <option value="url">Manual URL</option>
-                      <option value="presentation">Presentation</option>
-                    </select>
-                  </div>
+                  <div className="form-group"><label>URL</label>
+                    <input type="text" value={browserUrl} onChange={e => setBrowserUrl(e.target.value)}
+                      placeholder="https://example.com" /></div>
                 </div>
-                {browserSourceMode === 'url' ? (
-                  <div className="form-row">
-                    <div className="form-group"><label>URL</label>
-                      <input type="text" value={browserUrl} onChange={e => setBrowserUrl(e.target.value)}
-                        placeholder="https://example.com" /></div>
-                  </div>
-                ) : (
-                  <div className="form-row">
-                    <div className="form-group"><label>Presentation</label>
-                      <select value={selectedPresentationId || ''}
-                        onChange={e => setSelectedPresentationId(e.target.value ? Number(e.target.value) : null)}>
-                        <option value="">— Select a presentation —</option>
-                        {presentations.filter(p => p.status === 'ready').map(p => (
-                          <option key={p.id} value={p.id}>
-                            {p.name} ({p.slide_count} slides)
-                          </option>
-                        ))}
-                      </select>
-                      {presentations.filter(p => p.status === 'processing').length > 0 && (
-                        <span style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
-                          {presentations.filter(p => p.status === 'processing').length} presentation(s) still converting...
-                        </span>
-                      )}
-                      {presentations.filter(p => p.status === 'ready').length === 0 && (
-                        <span style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
-                          Upload a presentation in the Media Library first.
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                )}
                 <div className="form-row">
                   <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13,
                     color: 'var(--text-secondary)', padding: '4px 0' }}>
@@ -402,16 +377,66 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
               </div>
             ) : (
               <div className="config-display">
+                <div className="config-value"><span className="config-label">URL</span>
+                  <span className="mono" style={{ fontSize: 12, wordBreak: 'break-all' }}>
+                    {currentStream.browser_source?.url || 'Not configured'}
+                  </span></div>
+                <div className="config-value"><span className="config-label">Audio</span>
+                  <span>{currentStream.browser_source?.capture_audio ? 'Capturing' : 'Disabled'}</span></div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ── Presentation source configuration (only for presentation-type streams) ── */}
+        {isPresentation && (
+          <div className="config-section">
+            <div className="config-header">
+              <h3>Presentation Source</h3>
+              {isAdmin && (
+                !editingBrowser
+                  ? <button className="btn btn-sm btn-ghost" onClick={() => setEditingBrowser(true)}>Edit</button>
+                  : <div className="config-actions">
+                      <button className="btn btn-sm btn-accent" onClick={handleSaveBrowser}>Save</button>
+                      <button className="btn btn-sm btn-ghost" onClick={() => setEditingBrowser(false)}>Cancel</button>
+                    </div>
+              )}
+            </div>
+            {editingBrowser ? (
+              <div className="config-form">
+                <div className="form-row">
+                  <div className="form-group"><label>Presentation</label>
+                    <select value={selectedPresentationId || ''}
+                      onChange={e => setSelectedPresentationId(e.target.value ? Number(e.target.value) : null)}>
+                      <option value="">-- Select a presentation --</option>
+                      {presentations.filter(p => p.status === 'ready').map(p => (
+                        <option key={p.id} value={p.id}>{p.name}</option>
+                      ))}
+                    </select>
+                    {presentations.filter(p => p.status === 'ready').length === 0 && (
+                      <span style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+                        Upload a presentation in the Media Library first.
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <div className="form-row">
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13,
+                    color: 'var(--text-secondary)', padding: '4px 0' }}>
+                    <input type="checkbox" checked={browserAudio}
+                      onChange={e => setBrowserAudio(e.target.checked)} />
+                    Capture presentation audio (embedded media)
+                  </label>
+                </div>
+              </div>
+            ) : (
+              <div className="config-display">
                 {currentStream.remote_control ? (
-                  /* Presentation mode display */
                   <div className="config-value"><span className="config-label">Presentation</span>
-                    <span>{currentStream.remote_control.presentation_name}
-                      ({currentStream.remote_control.total_slides} slides)</span></div>
+                    <span>{currentStream.remote_control.presentation_name}</span></div>
                 ) : (
-                  <div className="config-value"><span className="config-label">URL</span>
-                    <span className="mono" style={{ fontSize: 12, wordBreak: 'break-all' }}>
-                      {currentStream.browser_source?.url || 'Not configured'}
-                    </span></div>
+                  <div className="config-value"><span className="config-label">Presentation</span>
+                    <span style={{ color: 'var(--text-muted)' }}>Not selected</span></div>
                 )}
                 <div className="config-value"><span className="config-label">Audio</span>
                   <span>{currentStream.browser_source?.capture_audio ? 'Capturing' : 'Disabled'}</span></div>
@@ -422,75 +447,63 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
 
         {/*
           noVNC interactive preview — embedded iframe connecting to websockify in the container.
-          Only shown when the browser source container is actually running and has a noVNC port assigned.
+          Shown for both browser and presentation streams when the container is running.
           Connects directly to the port (bypassing nginx) due to the nginx proxy limitation.
         */}
-        {isBrowser && isRunning && novncPort && (
+        {isContainerBased && isRunning && novncPort && (
           <div className="browser-preview">
-            <div className="config-header"><h3>Live Browser View (interactive)</h3></div>
+            <div className="config-header">
+              <h3>{isPresentation ? 'Live Presentation View' : 'Live Browser View (interactive)'}</h3>
+            </div>
             <iframe
               src={novncUrl}
-              title="Browser Source"
+              title={isPresentation ? 'Presentation Preview' : 'Browser Source'}
               className="novnc-frame"
               allow="clipboard-read; clipboard-write"
             />
           </div>
         )}
 
-        {/* ── Slide navigation controls (only when presentation is linked and stream is running) */}
-        {isBrowser && currentStream.remote_control && (
+        {/* ── Slide navigation controls (presentation streams only, when running) */}
+        {isPresentation && isRunning && (
           <div className="slide-controls">
             <div className="config-header">
-              <h3>Slide Control — {currentStream.remote_control.presentation_name}</h3>
+              <h3>Slide Control{currentStream.remote_control
+                ? ` — ${currentStream.remote_control.presentation_name}` : ''}</h3>
             </div>
             <div className="slide-nav">
               <button className="btn btn-sm"
-                disabled={currentStream.remote_control.current_slide <= 1}
+                title="First slide (Home)"
                 onClick={async () => {
-                  try {
-                    await navigateSlide(
-                      currentStream.remote_control.presentation_id,
-                      currentStream.remote_control.current_slide - 1
-                    );
-                    onRefresh();
-                  } catch (e) { setErrorMsg(e.message); }
+                  try { await slideControl(selectedStreamId, 'first'); }
+                  catch (e) { setErrorMsg(e.message); }
+                }}>
+                |◀ First
+              </button>
+              <button className="btn btn-sm"
+                title="Previous slide/animation (Left arrow)"
+                onClick={async () => {
+                  try { await slideControl(selectedStreamId, 'prev'); }
+                  catch (e) { setErrorMsg(e.message); }
                 }}>
                 ◀ Prev
               </button>
-              <span className="slide-indicator mono">
-                Slide {currentStream.remote_control.current_slide} / {currentStream.remote_control.total_slides}
-              </span>
               <button className="btn btn-sm"
-                disabled={currentStream.remote_control.current_slide >= currentStream.remote_control.total_slides}
+                title="Next slide/animation (Right arrow)"
                 onClick={async () => {
-                  try {
-                    await navigateSlide(
-                      currentStream.remote_control.presentation_id,
-                      currentStream.remote_control.current_slide + 1
-                    );
-                    onRefresh();
-                  } catch (e) { setErrorMsg(e.message); }
+                  try { await slideControl(selectedStreamId, 'next'); }
+                  catch (e) { setErrorMsg(e.message); }
                 }}>
                 Next ▶
               </button>
-            </div>
-            {/* Jump-to-slide input for quick access to any slide */}
-            <div className="slide-jump">
-              <label style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Go to slide:</label>
-              <input type="number" min="1" max={currentStream.remote_control.total_slides}
-                style={{ width: 60 }}
-                defaultValue={currentStream.remote_control.current_slide}
-                onKeyDown={async (e) => {
-                  if (e.key === 'Enter') {
-                    try {
-                      await navigateSlide(
-                        currentStream.remote_control.presentation_id,
-                        parseInt(e.target.value, 10)
-                      );
-                      onRefresh();
-                    } catch (err) { setErrorMsg(err.message); }
-                  }
-                }} />
+              <button className="btn btn-sm"
+                title="Last slide (End)"
+                onClick={async () => {
+                  try { await slideControl(selectedStreamId, 'last'); }
+                  catch (e) { setErrorMsg(e.message); }
+                }}>
+                Last ▶|
+              </button>
             </div>
           </div>
         )}
@@ -518,7 +531,7 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
             </>) : (
               <button className="btn btn-success" disabled={busy || !canStart}
                 onClick={() => doAction(() => startStream(selectedStreamId))}
-                title={!canStart ? (isBrowser ? 'Configure a URL first' : 'Add ready assets first') : ''}>
+                title={!canStart ? (isBrowser ? 'Configure a URL first' : isPresentation ? 'Select a presentation first' : 'Add ready assets first') : ''}>
                 ▶ Start
               </button>
             )}
@@ -530,7 +543,7 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
         </div>
 
         {/* ── Playlist section (only for playlist-type streams) ──────────── */}
-        {!isBrowser && (
+        {!isContainerBased && (
           <div className="playlist-section">
             <h3>Playlist ({currentStream.items.length} items)</h3>
             {playlistDirty && isRunning && (

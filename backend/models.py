@@ -68,8 +68,9 @@ class PlaybackMode(str, enum.Enum):
 
 class StreamSourceType(str, enum.Enum):
     """Determines how a stream generates its video content."""
-    PLAYLIST = "playlist"  # Concatenated media assets via ffmpeg
-    BROWSER = "browser"    # Virtual Firefox instance captured via x11grab
+    PLAYLIST = "playlist"        # Concatenated media assets via ffmpeg
+    BROWSER = "browser"          # Virtual Firefox instance captured via x11grab
+    PRESENTATION = "presentation"  # LibreOffice Impress slideshow captured via x11grab
 
 
 class PresentationStatus(str, enum.Enum):
@@ -296,9 +297,10 @@ class Presentation(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(512), nullable=False)
     owner_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    file_path = Column(String(1024), nullable=True)  # Path to the stored PPTX/ODP/PDF file
     slide_count = Column(Integer, default=0)
     current_slide = Column(Integer, default=1)  # 1-indexed
-    slides_dir = Column(String(1024), nullable=True)  # Path to directory of slide PNGs
+    slides_dir = Column(String(1024), nullable=True)  # Legacy — was used for slide PNGs
     status = Column(SAEnum(PresentationStatus), default=PresentationStatus.UPLOADING)
     error_message = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)

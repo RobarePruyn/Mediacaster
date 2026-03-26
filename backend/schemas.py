@@ -255,7 +255,7 @@ class StreamCreate(BaseModel):
     # Port range 1024-65535 to avoid privileged ports
     multicast_port: int = Field(default=5000, ge=1024, le=65535)
     playback_mode: str = Field(default="loop")
-    source_type: str = Field(default="playlist")  # "playlist" or "browser"
+    source_type: str = Field(default="playlist")  # "playlist", "browser", or "presentation"
 
 
 class StreamUpdate(BaseModel):
@@ -340,7 +340,7 @@ class StreamResponse(BaseModel):
     multicast_port: int
     status: str                # "stopped", "starting", "running", or "error"
     playback_mode: str         # "loop" or "oneshot"
-    source_type: str = "playlist"  # "playlist" or "browser"
+    source_type: str = "playlist"  # "playlist", "browser", or "presentation"
     items: List[StreamItemResponse] = []
     browser_source: Optional[BrowserSourceResponse] = None
     remote_control: Optional[RemoteControlInfo] = None  # Present when browser source has a linked presentation

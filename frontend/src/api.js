@@ -192,7 +192,7 @@ export async function renameAsset(id, displayName) {
 
 // ─── Streams ──────────────────────────────────────────────────────────────────
 
-/** Creates a new stream. Admin-only. source_type is 'playlist' or 'browser'. */
+/** Creates a new stream. Admin-only. source_type is 'playlist', 'browser', or 'presentation'. */
 export async function createStream(data) { return apiFetch('/streams', { method: 'POST', body: JSON.stringify(data) }); }
 /** Lists all streams (admin sees all, regular users see only their assigned channels). */
 export async function listStreams() { return apiFetch('/streams'); }
@@ -312,7 +312,7 @@ export async function getMonitoring() { return apiFetch('/monitoring'); }
 
 /**
  * Uploads a presentation file (PPTX, ODP, PDF) using XHR for progress tracking.
- * After upload, the backend converts slides to PNGs via LibreOffice headless.
+ * The file is stored as-is — LibreOffice renders it natively in the container.
  */
 export async function uploadPresentation(file, onProgress) {
   return new Promise((resolve, reject) => {
@@ -339,11 +339,14 @@ export async function uploadPresentation(file, onProgress) {
 export async function listPresentations() { return apiFetch('/presentations/'); }
 /** Gets a single presentation's details. */
 export async function getPresentation(id) { return apiFetch(`/presentations/${id}`); }
-/** Deletes a presentation and its slide files. */
+/** Deletes a presentation and its file from disk. */
 export async function deletePresentation(id) { return apiFetch(`/presentations/${id}`, { method: 'DELETE' }); }
-/** Navigates to a specific slide (1-indexed). */
-export async function navigateSlide(presentationId, slide) {
-  return apiFetch(`/presentations/${presentationId}/navigate`, {
-    method: 'POST', body: JSON.stringify({ slide }),
+/**
+ * Sends a slide navigation command to a running presentation stream.
+ * action: 'next', 'prev', 'first', 'last'
+ */
+export async function slideControl(streamId, action) {
+  return apiFetch(`/streams/${streamId}/slide-control`, {
+    method: 'POST', body: JSON.stringify({ action }),
   });
 }
