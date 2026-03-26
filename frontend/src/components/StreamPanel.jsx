@@ -61,6 +61,8 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
   const [selectedPresentationId, setSelectedPresentationId] = useState(null);
   /** Source mode: 'url' for manual URL, 'presentation' for linked presentation */
   const [browserSourceMode, setBrowserSourceMode] = useState('url');
+  /** True once the noVNC port is confirmed reachable (prevents 502 flash in iframe) */
+  const [novncReady, setNovncReady] = useState(false);
 
   /** The currently selected stream object (derived from the streams array) */
   const currentStream = streams.find(s => s.id === selectedStreamId);
@@ -86,6 +88,42 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
     const interval = setInterval(pollStatus, 2000);
     return () => clearInterval(interval);
   }, [pollStatus]);
+
+  /**
+   * Polls the noVNC port until it responds before showing the iframe.
+   * Prevents the 502 Bad Gateway flash that occurs when the iframe loads
+   * before websockify is ready inside the container.
+   */
+  useEffect(() => {
+    const port = currentStream?.browser_source?.novnc_port;
+    const running = currentStream?.status === 'running' || currentStream?.status === 'starting';
+    const containerType = currentStream?.source_type === 'browser' || currentStream?.source_type === 'presentation';
+
+    // Reset when stream changes, stops, or isn't container-based
+    if (!port || !running || !containerType) {
+      setNovncReady(false);
+      return;
+    }
+
+    let cancelled = false;
+    const checkUrl = `${window.location.origin}/novnc/${port}/vnc_embed.html`;
+
+    async function probe() {
+      while (!cancelled) {
+        try {
+          const resp = await fetch(checkUrl, { method: 'HEAD' });
+          if (!cancelled && resp.ok) {
+            setNovncReady(true);
+            return;
+          }
+        } catch {}
+        // Retry every 1.5 seconds until websockify is up
+        await new Promise(r => setTimeout(r, 1500));
+      }
+    }
+    probe();
+    return () => { cancelled = true; };
+  }, [currentStream?.browser_source?.novnc_port, currentStream?.status, currentStream?.source_type, selectedStreamId]);
 
   /**
    * Syncs the form state whenever the selected stream changes.
@@ -448,19 +486,27 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
         {/*
           noVNC interactive preview — embedded iframe connecting to websockify in the container.
           Shown for both browser and presentation streams when the container is running.
-          Connects directly to the port (bypassing nginx) due to the nginx proxy limitation.
+          The iframe is only rendered after a HEAD probe confirms websockify is listening,
+          which prevents the 502 Bad Gateway flash during container startup.
         */}
         {isContainerBased && isRunning && novncPort && (
           <div className="browser-preview">
             <div className="config-header">
               <h3>{isPresentation ? 'Live Presentation View' : 'Live Browser View (interactive)'}</h3>
             </div>
-            <iframe
-              src={novncUrl}
-              title={isPresentation ? 'Presentation Preview' : 'Browser Source'}
-              className="novnc-frame"
-              allow="clipboard-read; clipboard-write"
-            />
+            {novncReady ? (
+              <iframe
+                src={novncUrl}
+                title={isPresentation ? 'Presentation Preview' : 'Browser Source'}
+                className="novnc-frame"
+                allow="clipboard-read; clipboard-write"
+              />
+            ) : (
+              <div className="novnc-loading">
+                <div className="novnc-spinner" />
+                <span>Starting container...</span>
+              </div>
+            )}
           </div>
         )}
 

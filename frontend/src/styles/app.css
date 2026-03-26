@@ -297,6 +297,18 @@ body { font-family: var(--font-body); font-size: 14px; line-height: 1.5; color: 
    prevent any overflow from the iframe's content. */
 .novnc-frame { width: 100%; aspect-ratio: 16/9; border: 1px solid var(--border); border-radius: var(--radius-sm); background: #000; margin-top: 8px; display: block; overflow: hidden; }
 
+/* Loading placeholder shown while websockify starts up inside the container */
+.novnc-loading {
+  width: 100%; aspect-ratio: 16/9; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: #000; margin-top: 8px; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 12px; color: var(--text-muted); font-size: 13px;
+}
+.novnc-spinner {
+  width: 32px; height: 32px; border: 3px solid var(--border); border-top-color: var(--accent);
+  border-radius: 50%; animation: novnc-spin 0.8s linear infinite;
+}
+@keyframes novnc-spin { to { transform: rotate(360deg); } }
+
 /* ===================================================================
    Folder sidebar and media library layout
    =================================================================== */
