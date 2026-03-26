@@ -446,8 +446,13 @@ class BrowserManager:
             "-e", f"NOVNC_PORT={novnc_port}",
             "-e", f"CAPTURE_AUDIO={'true' if capture_audio else 'false'}",
             "-e", f"VIDEO_BITRATE={config.BROWSER_SOURCE_VIDEO_BITRATE}",
-            "-e", f"ENCODER_PRESET={config.BROWSER_SOURCE_VIDEO_PRESET}",
-            "-e", f"ENCODER_TUNE={config.BROWSER_SOURCE_VIDEO_TUNE}",
+            # Presentations need a slower preset than browser sources:
+            # "ultrafast" forces Constrained Baseline (no B-frames) and
+            # breaks CBR, causing macroblocking on static slides. "fast"
+            # gives Main profile with proper rate control. "stillimage"
+            # tune optimizes for the mostly-static content of slideshows.
+            "-e", "ENCODER_PRESET=fast",
+            "-e", "ENCODER_TUNE=stillimage",
             "-e", f"AUDIO_BITRATE={config.BROWSER_SOURCE_AUDIO_BITRATE}",
             CONTAINER_IMAGE,
         ]
