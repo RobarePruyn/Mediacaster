@@ -448,10 +448,10 @@ class BrowserManager:
             "-e", f"VIDEO_BITRATE={config.BROWSER_SOURCE_VIDEO_BITRATE}",
             # Presentations need a slower preset than browser sources:
             # "ultrafast" forces Constrained Baseline (no B-frames) and
-            # breaks CBR, causing macroblocking on static slides. "fast"
-            # gives Main profile with proper rate control. "stillimage"
-            # tune optimizes for the mostly-static content of slideshows.
-            "-e", "ENCODER_PRESET=fast",
+            # breaks CBR, causing macroblocking. "veryfast" is the lightest
+            # preset that still enables Main profile (B-frames + proper
+            # rate control) while staying comfortably above real-time.
+            "-e", "ENCODER_PRESET=veryfast",
             "-e", "ENCODER_TUNE=stillimage",
             "-e", f"AUDIO_BITRATE={config.BROWSER_SOURCE_AUDIO_BITRATE}",
             CONTAINER_IMAGE,
