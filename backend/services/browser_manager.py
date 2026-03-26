@@ -448,11 +448,12 @@ class BrowserManager:
             "-e", f"VNC_PORT={vnc_port}",
             "-e", f"NOVNC_PORT={novnc_port}",
             "-e", f"CAPTURE_AUDIO={'true' if capture_audio else 'false'}",
-            "-e", f"VIDEO_BITRATE={config.BROWSER_SOURCE_VIDEO_BITRATE}",
-            # "ultrafast" forces Constrained Baseline (no B-frames, broken CBR).
-            # "superfast" is the lightest preset that doesn't break CBR rate
-            # control while keeping encoding well above real-time speed.
-            "-e", "ENCODER_PRESET=superfast",
+            # 720p presentations need far less bitrate than browser sources.
+            # 20Mbps CBR on static slides forces the encoder to pad at q=0-2,
+            # which paradoxically makes it slower than real-time. 6Mbps is
+            # ample for sharp text at 720p and lets the encoder run fast.
+            "-e", "VIDEO_BITRATE=6M",
+            "-e", "ENCODER_PRESET=ultrafast",
             "-e", f"AUDIO_BITRATE={config.BROWSER_SOURCE_AUDIO_BITRATE}",
             CONTAINER_IMAGE,
         ]
