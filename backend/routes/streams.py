@@ -24,8 +24,8 @@ RBAC model:
 
 Three source types:
 - PLAYLIST: ffmpeg concat loop of transcoded assets → MPEG-TS multicast
-- BROWSER: Podman container with Xvfb + Firefox + ffmpeg x11grab → MPEG-TS multicast
-- PRESENTATION: Podman container with Xvfb + LibreOffice Impress --show + ffmpeg x11grab → MPEG-TS multicast
+- BROWSER: Wayland capture (weston + Firefox + wf-recorder + ffmpeg → MPEG-TS multicast)
+- PRESENTATION: Wayland capture (weston + LibreOffice Impress + wf-recorder + ffmpeg → MPEG-TS multicast)
 """
 
 import logging
@@ -499,8 +499,8 @@ async def start_stream(stream_id: int, request: Request, db: Session = Depends(g
                        current_user: User = Depends(get_current_user)):
     """Start a stream. Dispatches to browser_manager or stream_manager based on source type.
 
-    For BROWSER streams: launches a Podman container with Xvfb + Firefox + ffmpeg,
-    captures the virtual display, and sends it as MPEG-TS multicast.
+    For BROWSER/PRESENTATION streams: launches a native Wayland capture pipeline
+    (weston + Firefox/LibreOffice + wf-recorder + ffmpeg → MPEG-TS multicast).
 
     For PLAYLIST streams: starts an ffmpeg concat loop process that reads the
     playlist items and outputs MPEG-TS multicast.
@@ -602,8 +602,8 @@ async def stop_stream(stream_id: int, request: Request, db: Session = Depends(ge
                       current_user: User = Depends(get_current_user)):
     """Stop a running stream. Dispatches to the appropriate manager.
 
-    For BROWSER streams: stops and removes the Podman container, then
-    updates the DB status. For PLAYLIST streams: kills the ffmpeg process
+    For BROWSER/PRESENTATION streams: terminates all Wayland capture processes,
+    then updates the DB status. For PLAYLIST streams: kills the ffmpeg process
     (stream_manager handles status update internally).
     """
     stream = db.query(Stream).filter(Stream.id == stream_id).first()
@@ -711,8 +711,8 @@ async def slide_control(stream_id: int, body: dict, request: Request,
                         current_user: User = Depends(get_current_user)):
     """Send a slide navigation command to a running presentation stream.
 
-    Sends xdotool key events to the LibreOffice Impress instance inside the
-    container. Supported actions map to LibreOffice slideshow keyboard shortcuts:
+    Sends ydotool key events to the LibreOffice Impress instance via the
+    Wayland compositor. Supported actions map to LibreOffice slideshow shortcuts:
 
       next:  Right arrow — advance to next slide/animation
       prev:  Left arrow — go back one slide/animation
@@ -747,6 +747,6 @@ async def slide_control(stream_id: int, body: dict, request: Request,
     bm = request.app.state.browser_manager
     success = await bm.send_key(stream_id, key)
     if not success:
-        raise HTTPException(status_code=500, detail="Failed to send key command to container")
+        raise HTTPException(status_code=500, detail="Failed to send key command to capture source")
 
     return {"message": f"Slide control '{action}' sent", "action": action}

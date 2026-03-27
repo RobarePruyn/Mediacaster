@@ -122,11 +122,65 @@ else
     log_info "LibreOffice already installed: $(libreoffice --version 2>&1 | head -1)"
 fi
 
-# Podman runs browser source containers (containerized Firefox + capture stack).
-# We use Podman instead of Docker because it's the default container runtime
-# on RHEL/AlmaLinux and supports rootless operation.
-log_info "Installing browser source runtime (Podman for containerized browser capture)..."
-dnf install -y podman
+# Wayland capture pipeline — native process-based browser/presentation source capture.
+# Replaces the Podman container approach for lower overhead and better encoding quality.
+log_info "Installing Wayland capture stack (weston, wayvnc, Firefox, websockify)..."
+dnf install -y weston wayvnc firefox python3-websockify
+
+# Build dependencies for wf-recorder and ydotool (source builds)
+log_info "Installing build dependencies for wf-recorder and ydotool..."
+dnf install -y gcc gcc-c++ meson ninja-build cmake scdoc \
+    wlroots-devel wayland-devel ffmpeg-devel libdrm-devel pulseaudio-libs-devel
+
+# Build wf-recorder from source — wlroots screencopy-based screen recorder.
+# Not available as an RPM on AlmaLinux 10. Used to capture weston's output
+# and pipe raw video frames to ffmpeg for encoding.
+if ! command -v wf-recorder &>/dev/null; then
+    log_info "Building wf-recorder from source..."
+    cd /tmp
+    git clone https://github.com/ammen99/wf-recorder.git
+    cd wf-recorder
+    meson setup build --prefix=/usr/local
+    ninja -C build
+    ninja -C build install
+    rm -rf /tmp/wf-recorder
+    log_info "wf-recorder installed: $(wf-recorder --version 2>&1 || echo 'built')"
+else
+    log_info "wf-recorder already installed: $(which wf-recorder)"
+fi
+
+# Build ydotool from source — Wayland-native input injection tool.
+# Replaces xdotool (X11-only) for sending keyboard events to LibreOffice
+# Impress during presentation slideshow control.
+if ! command -v ydotool &>/dev/null; then
+    log_info "Building ydotool from source..."
+    cd /tmp
+    git clone https://github.com/ReimuNotMoe/ydotool.git
+    cd ydotool
+    mkdir build && cd build
+    cmake -DCMAKE_INSTALL_PREFIX=/usr/local ..
+    make -j"$(nproc)"
+    make install
+    rm -rf /tmp/ydotool
+    log_info "ydotool installed: $(ydotool --version 2>&1 || echo 'built')"
+else
+    log_info "ydotool already installed: $(which ydotool)"
+fi
+
+# Install noVNC static files for the browser-based VNC client.
+# websockify serves these files and bridges WebSocket to VNC protocol.
+NOVNC_DIR="${APP_DIR}/novnc"
+if [[ ! -d "${NOVNC_DIR}/core" ]]; then
+    log_info "Installing noVNC static files..."
+    cd /tmp
+    git clone --depth 1 https://github.com/novnc/noVNC.git novnc-src
+    mkdir -p "${NOVNC_DIR}"
+    cp -r novnc-src/core novnc-src/vendor novnc-src/vnc_lite.html "${NOVNC_DIR}/"
+    rm -rf /tmp/novnc-src
+    log_info "noVNC installed to ${NOVNC_DIR}"
+else
+    log_info "noVNC already installed at ${NOVNC_DIR}"
+fi
 
 # Auto-detect the python3 binary — different AL versions install different
 # minor versions, and the venv/pip must use the matching binary
@@ -204,26 +258,14 @@ if ! id "${APP_USER}" &>/dev/null; then
     log_info "Created system user: ${APP_USER}"
 fi
 
-# audio/video groups allow PulseAudio and GPU access inside containers
+# audio/video groups allow PulseAudio access for audio capture
 usermod -a -G audio,video "${APP_USER}" 2>/dev/null || true
 
-# Podman user namespace mapping requires subuid/subgid ranges allocated
-# to the user. Without this, rootless Podman cannot create user namespaces
-# and container startup fails with permission errors.
-if ! grep -q "^${APP_USER}:" /etc/subuid 2>/dev/null; then
-    log_info "Configuring subuid/subgid for rootless Podman..."
-    usermod --add-subuids 100000-165535 --add-subgids 100000-165535 "${APP_USER}"
-fi
-
-# Podman needs XDG_RUNTIME_DIR to store its socket and temporary state.
+# XDG_RUNTIME_DIR is required by weston for Wayland display sockets.
 # System users don't get this automatically (no PAM session), so we
 # create it manually. The systemd service also creates it via ExecStartPre.
 mkdir -p "/run/user/$(id -u ${APP_USER})"
 chown "${APP_USER}:${APP_GROUP}" "/run/user/$(id -u ${APP_USER})"
-
-# Lingering keeps the user's systemd slice active even when no session exists,
-# which is required for Podman containers to persist after deployment
-loginctl enable-linger "${APP_USER}" 2>/dev/null || true
 
 # Create the data directories — media/uploads/thumbnails hold user content,
 # db holds the SQLite database, playlists holds generated ffmpeg concat files
@@ -248,14 +290,16 @@ log_info "Creating Python virtual environment..."
 "${APP_DIR}/venv/bin/pip" install --upgrade pip
 "${APP_DIR}/venv/bin/pip" install -r "${APP_DIR}/requirements.txt"
 
-# Container build files are needed on the server so the image can be rebuilt
-# without re-deploying the entire app
-cp -r "${SCRIPT_DIR}/container" "${APP_DIR}/"
+# Copy the custom vnc_embed.html to the noVNC directory for iframe embedding
+if [[ -f "${SCRIPT_DIR}/container/vnc_embed.html" ]]; then
+    cp "${SCRIPT_DIR}/container/vnc_embed.html" "${APP_DIR}/novnc/"
+    log_info "Installed vnc_embed.html to noVNC directory"
+fi
 
 # ---------------------------------------------------------------------------
-# Step 6: Build frontend and container image
+# Step 6: Build frontend
 # ---------------------------------------------------------------------------
-log_step "Step 6/10: Building React frontend and browser source container"
+log_step "Step 6/10: Building React frontend"
 
 cd "${APP_DIR}/frontend"
 # --include=dev ensures devDependencies (Vite, build tooling) are
@@ -266,30 +310,6 @@ npm run build
 # (the built static files in dist/ are served by nginx)
 rm -rf node_modules
 log_info "Frontend build complete"
-
-# Build the browser source container image as root — stored in root's podman
-# image store. The mcs user runs containers via `sudo podman` (configured
-# below in sudoers) which gives it access to root's image store.
-log_info "Building browser source container image (this may take a few minutes)..."
-cd "${APP_DIR}/container"
-podman build -t mcs-browser-source:latest -f Containerfile . || {
-    log_warn "Container image build failed — browser sources will not be available"
-    log_warn "Rebuild later: cd ${APP_DIR}/container && sudo podman build -t mcs-browser-source:latest ."
-}
-
-# Grant the mcs user passwordless sudo access to podman only.
-# This is necessary because:
-#   1. --network=host (needed for multicast output) requires root privileges
-#   2. The container image is stored in root's podman storage
-#   3. The mcs user has /sbin/nologin shell and can't run podman rootlessly
-# Security note: this grants full podman control, but podman is scoped to
-# container operations only — it cannot escalate to arbitrary root commands.
-log_info "Configuring sudo access for podman..."
-cat > /etc/sudoers.d/mcs-podman << 'SUDOERS'
-# Allow the multicast streamer service to manage containers
-mcs ALL=(root) NOPASSWD: /usr/bin/podman
-SUDOERS
-chmod 440 /etc/sudoers.d/mcs-podman
 
 # ---------------------------------------------------------------------------
 # Step 7: Permissions
@@ -606,19 +626,15 @@ dnf remove -y \
     libpinyin malcontent malcontent-libs \
     2>/dev/null || true
 
-# Remove build tools — all pip dependencies use pre-built wheels
-log_info "Removing build tools (not needed — pip deps are pre-built wheels)..."
-dnf remove -y \
-    gcc gcc-c++ cpp make \
-    kernel-headers kernel-devel \
-    glibc-devel glibc-headers \
-    libstdc++-devel \
-    binutils \
-    2>/dev/null || true
+# NOTE: Build tools (gcc, meson, cmake) are kept installed because they were
+# needed to build wf-recorder and ydotool, and may be needed for future rebuilds.
 
 # Protect application dependencies from autoremove, then clean up orphans
 log_info "Cleaning up orphaned dependencies..."
-dnf mark install postgresql-server postgresql python3 podman nginx ffmpeg nodejs openssl 2>/dev/null || true
+dnf mark install postgresql-server postgresql python3 nginx ffmpeg nodejs openssl \
+    weston wayvnc firefox python3-websockify \
+    gcc gcc-c++ meson ninja-build cmake \
+    wlroots-devel wayland-devel ffmpeg-devel 2>/dev/null || true
 dnf autoremove -y
 dnf clean all
 

@@ -3,7 +3,8 @@
 # ==========================================================================
 # Runs the FastAPI/uvicorn backend as the unprivileged 'mcs' system user.
 # The backend spawns ffmpeg subprocesses for playlist streams and manages
-# Podman containers for browser source capture via sudo.
+# native Wayland process groups (weston, Firefox, wf-recorder, ffmpeg,
+# wayvnc) for browser/presentation source capture.
 # ==========================================================================
 
 [Unit]
@@ -20,44 +21,42 @@ Group=mcs
 WorkingDirectory=/opt/multicast-streamer
 
 # PATH includes the venv bin dir first so uvicorn and python resolve to the
-# virtualenv versions, not the system-wide ones
+# virtualenv versions. /usr/local/bin is needed for source-built wf-recorder
+# and ydotool.
 Environment="PATH=/opt/multicast-streamer/venv/bin:/usr/local/bin:/usr/bin"
 # PYTHONPATH ensures `from backend.xxx import` works from the app root
 Environment="PYTHONPATH=/opt/multicast-streamer"
-# HOME is needed by Podman and various Python libraries that look for ~/.config
+# HOME is needed by various Python libraries that look for ~/.config
 Environment="HOME=/opt/multicast-streamer"
-# XDG_RUNTIME_DIR is required by Podman for its socket and temp files.
-# %U expands to the UID of the User= specified above.
+# XDG_RUNTIME_DIR is required by weston for Wayland display sockets.
+# Each capture source creates a subdirectory (mcs-50/, mcs-51/, etc.) for
+# its own isolated weston instance. %U expands to the UID of User= above.
 Environment="XDG_RUNTIME_DIR=/run/user/%U"
 
 # The '+' prefix runs this command as root regardless of User= above.
 # This is necessary because /run/user/ directories are normally created by
 # pam_systemd during login, but the mcs user has /sbin/nologin and never
-# logs in. Without this, Podman fails with "XDG_RUNTIME_DIR not set".
+# logs in. Without this, weston fails with "XDG_RUNTIME_DIR not set".
 ExecStartPre=+/bin/bash -c 'mkdir -p /run/user/$(id -u mcs) && chown mcs:mcs /run/user/$(id -u mcs)'
 
 # Single worker is intentional — the app uses in-process state (stream manager
 # subprocess tracking, monitor caches) that would break with multiple workers.
-# For scaling, a process manager like gunicorn with shared state would be needed.
 ExecStart=/opt/multicast-streamer/venv/bin/uvicorn backend.main:app --host 127.0.0.1 --port 8000 --workers 1 --log-level info
 
-# Give ffmpeg subprocesses and Podman containers time to shut down gracefully
+# Give ffmpeg and Wayland processes time to shut down gracefully
 TimeoutStopSec=30
 KillSignal=SIGTERM
 # Auto-restart on unexpected exit (crash, OOM kill) but not on clean shutdown
 Restart=on-failure
 RestartSec=5
 
-# Sandboxing: relaxed to accommodate Podman and ffmpeg subprocess management.
-# - /opt/multicast-streamer: app code, media, database, playlists
-# - /tmp: ffmpeg uses temp files during transcoding; Podman also uses /tmp
-ReadWritePaths=/opt/multicast-streamer /tmp
-# ProtectSystem=full makes /usr, /boot, /etc read-only (but not /opt, /tmp)
+# Sandboxing
+# - /opt/multicast-streamer: app code, media, database, playlists, noVNC files
+# - /tmp: ffmpeg uses temp files during transcoding
+# - /run/user: weston Wayland sockets and per-stream runtime directories
+ReadWritePaths=/opt/multicast-streamer /tmp /run/user
 ProtectSystem=full
-# ProtectHome=false is needed because some Python libraries probe $HOME paths
-# even though we redirect HOME to /opt/multicast-streamer
 ProtectHome=false
 
 [Install]
-# Start at normal multi-user boot (runlevel 3+)
 WantedBy=multi-user.target

@@ -132,6 +132,20 @@ OIDC_DISPLAY_NAME = os.getenv("MCS_OIDC_DISPLAY_NAME", "SSO")
 FFMPEG_PATH = os.getenv("MCS_FFMPEG_PATH", "/usr/bin/ffmpeg")
 FFPROBE_PATH = os.getenv("MCS_FFPROBE_PATH", "/usr/bin/ffprobe")
 
+# ── Wayland capture pipeline paths ───────────────────────────────────────────
+# Native Wayland tools used by wayland_manager.py for browser/presentation
+# source capture. wf-recorder and ydotool are source-built to /usr/local/bin
+# since they're not available as RPMs on AlmaLinux 10.
+WESTON_PATH = os.getenv("MCS_WESTON_PATH", "/usr/bin/weston")
+WF_RECORDER_PATH = os.getenv("MCS_WF_RECORDER_PATH", "/usr/local/bin/wf-recorder")
+WAYVNC_PATH = os.getenv("MCS_WAYVNC_PATH", "/usr/bin/wayvnc")
+YDOTOOL_PATH = os.getenv("MCS_YDOTOOL_PATH", "/usr/local/bin/ydotool")
+YDOTOOLD_PATH = os.getenv("MCS_YDOTOOLD_PATH", "/usr/local/bin/ydotoold")
+FIREFOX_PATH = os.getenv("MCS_FIREFOX_PATH", "/usr/bin/firefox")
+WEBSOCKIFY_PATH = os.getenv("MCS_WEBSOCKIFY_PATH", "/usr/bin/websockify")
+# noVNC static files served by websockify for the browser-based VNC client
+NOVNC_DIR = os.getenv("MCS_NOVNC_DIR", "/opt/multicast-streamer/novnc")
+
 # ── Directory initialization ─────────────────────────────────────────────────
 # Create all required data directories at import time so the rest of the
 # application can assume they exist. parents=True handles nested paths,

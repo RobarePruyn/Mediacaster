@@ -4,8 +4,8 @@
 # ===========================================================================
 #
 # Pulls the latest code from git and applies all changes without running
-# a full deploy. Handles: nginx config, frontend rebuild, container image
-# rebuild, Python dependencies, and service restart.
+# a full deploy. Handles: nginx config, frontend rebuild, Python
+# dependencies, noVNC files, and service restart.
 #
 # Usage:   sudo bash update.sh
 #
@@ -15,6 +15,7 @@
 #   - Initialize PostgreSQL
 #   - Configure firewall/SELinux
 #   - Generate TLS certificates
+#   - Build wf-recorder/ydotool from source
 #   - Run OS cleanup
 #
 # ===========================================================================
@@ -101,23 +102,12 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Optional: Rebuild container image
+# Optional: Update noVNC files and vnc_embed.html
 # ---------------------------------------------------------------------------
-# Check if container files changed in the last commit
-if git diff HEAD~1 --name-only 2>/dev/null | grep -q "^container/"; then
-    log_step "Container files changed — rebuilding browser source image"
-    # Stop any running containers so the old image can be replaced
-    podman stop -a 2>/dev/null || true
-    podman rm -a 2>/dev/null || true
-    cd "${APP_DIR}/container"
-    podman build -t mcs-browser-source:latest -f Containerfile . || {
-        log_warn "Container image build failed — browser sources may not work"
-        log_warn "Rebuild manually: cd ${APP_DIR}/container && sudo podman build -t mcs-browser-source:latest ."
-    }
-    log_info "Container image rebuilt"
-else
-    log_info "No container changes detected — skipping image rebuild"
-    log_info "To force a rebuild: cd ${APP_DIR}/container && sudo podman build -t mcs-browser-source:latest ."
+NOVNC_DIR="${APP_DIR}/novnc"
+if [[ -f "${APP_DIR}/container/vnc_embed.html" ]]; then
+    cp "${APP_DIR}/container/vnc_embed.html" "${NOVNC_DIR}/" 2>/dev/null || true
+    log_info "Updated vnc_embed.html in noVNC directory"
 fi
 
 # ---------------------------------------------------------------------------

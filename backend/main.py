@@ -6,7 +6,7 @@ This is the top-level module that bootstraps the entire application:
   - Runs Alembic migrations on startup (PostgreSQL schema management)
   - Seeds a default admin user and server settings
   - Initializes the StreamManager (ffmpeg playlist playout) and
-    BrowserManager (Podman-based browser capture) singletons
+    WaylandManager (native Wayland capture pipeline) singletons
   - Serves the React SPA from the frontend build directory
   - Gracefully shuts down all active streams on exit
 
@@ -27,7 +27,7 @@ from backend.database import SessionLocal
 from backend.models import User, Asset, AssetStatus, Presentation, PresentationStatus
 from backend.auth import hash_password
 from backend.services.stream_manager import StreamManager
-from backend.services.browser_manager import BrowserManager
+from backend.services.wayland_manager import WaylandManager
 from backend.routes import auth as auth_routes
 from backend.routes import assets as asset_routes
 from backend.routes import streams as stream_routes
@@ -127,13 +127,14 @@ async def lifespan(app: FastAPI):
         db.close()
 
     # StreamManager handles ffmpeg concat-demuxer subprocesses for playlist streams.
-    # BrowserManager handles Podman containers for browser source capture.
+    # WaylandManager handles native Wayland capture pipelines for browser/presentation sources.
     # Both need a session factory to update stream status in the DB independently.
     app.state.stream_manager = StreamManager(db_session_factory=SessionLocal)
-    app.state.browser_manager = BrowserManager(db_session_factory=SessionLocal)
+    # Attribute name kept as browser_manager for API compatibility with routes/streams.py
+    app.state.browser_manager = WaylandManager(db_session_factory=SessionLocal)
 
-    # Restore browser sources that were marked as running before a server restart.
-    # This re-launches their Podman containers with the same display/port config.
+    # Restore capture sources that were marked as running before a server restart.
+    # This re-launches their Wayland process groups with the same display/port config.
     try:
         await app.state.browser_manager.restore_sessions()
     except Exception as exc:
@@ -151,7 +152,7 @@ async def lifespan(app: FastAPI):
     yield  # Application is running — control returns here on shutdown
 
     # --- Shutdown ---
-    logger.info("Stopping all streams and browser sources...")
+    logger.info("Stopping all streams and capture sources...")
     await app.state.stream_manager.stop_all()
     await app.state.browser_manager.stop_all()
 

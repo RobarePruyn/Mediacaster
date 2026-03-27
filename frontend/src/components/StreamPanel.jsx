@@ -3,8 +3,8 @@
  *
  * Handles all three stream source types:
  *   - Playlist streams: ffmpeg concat demuxer → MPEG-TS UDP multicast
- *   - Browser source streams: Podman container with Xvfb + Firefox + ffmpeg x11grab → multicast
- *   - Presentation streams: Podman container with Xvfb + LibreOffice Impress + ffmpeg x11grab → multicast
+ *   - Browser source streams: Wayland capture (weston + Firefox + wf-recorder + ffmpeg → multicast)
+ *   - Presentation streams: Wayland capture (weston + LibreOffice Impress + wf-recorder + ffmpeg → multicast)
  *
  * Features:
  *   - Stream tab bar with status dot indicators
@@ -75,13 +75,13 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
   /** Convenience flags for source type checks */
   const isBrowser = currentStream?.source_type === 'browser';
   const isPresentation = currentStream?.source_type === 'presentation';
-  /** True for source types that use a container (browser or presentation) */
+  /** True for source types that use Wayland capture (browser or presentation) */
   const isContainerBased = isBrowser || isPresentation;
 
   /**
    * Polls the stream status endpoint every 2 seconds.
    * This keeps the transport control state (running/stopped), PID display,
-   * and container status up to date in real time.
+   * and capture source status up to date in real time.
    */
   const pollStatus = useCallback(async () => {
     if (!selectedStreamId) return;
@@ -98,14 +98,14 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
   /**
    * Polls the noVNC port until it responds before showing the iframe.
    * Prevents the 502 Bad Gateway flash that occurs when the iframe loads
-   * before websockify is ready inside the container.
+   * before websockify is ready.
    */
   useEffect(() => {
     const port = currentStream?.browser_source?.novnc_port;
     const running = currentStream?.status === 'running' || currentStream?.status === 'starting';
     const containerType = currentStream?.source_type === 'browser' || currentStream?.source_type === 'presentation';
 
-    // Reset when stream changes, stops, or isn't container-based
+    // Reset when stream changes, stops, or isn't a capture source
     if (!port || !running || !containerType) {
       setNovncReady(false);
       return;
@@ -566,10 +566,10 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
         )}
 
         {/*
-          noVNC interactive preview — embedded iframe connecting to websockify in the container.
-          Shown for both browser and presentation streams when the container is running.
+          noVNC interactive preview — embedded iframe connecting to websockify.
+          Shown for both browser and presentation streams when the capture source is running.
           The iframe is only rendered after a HEAD probe confirms websockify is listening,
-          which prevents the 502 Bad Gateway flash during container startup.
+          which prevents the 502 Bad Gateway flash during source startup.
         */}
         {isContainerBased && isRunning && novncPort && (
           <div className="browser-preview">
@@ -592,7 +592,7 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
             ) : (
               <div className="novnc-loading">
                 <div className="novnc-spinner" />
-                <span>Starting container...</span>
+                <span>Starting capture source...</span>
               </div>
             )}
           </div>

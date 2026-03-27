@@ -20,7 +20,8 @@ Mediacaster is a web-based MPEG-TS multicast playout system. Users upload media 
 - **Services:**
   - `backend/services/transcoder.py` — normalizes all uploads to H.264/AAC. Video, image (black+duration), and audio (black video + source audio). Progress tracking via ffmpeg `-progress pipe:1`
   - `backend/services/stream_manager.py` — manages ffmpeg concat→multicast subprocesses for playlist streams, auto-restart on crash
-  - `backend/services/browser_manager.py` — manages Podman containers for browser source capture. Each container runs AlmaLinux 9 with Xvfb + Firefox + x11vnc + websockify + ffmpeg x11grab. Uses `sudo podman` (sudoers configured in deploy.sh)
+  - `backend/services/wayland_manager.py` — manages native Wayland capture pipelines for browser/presentation sources. Each source runs weston headless + Firefox/LibreOffice + wf-recorder + ffmpeg + wayvnc + websockify as native processes (no containers)
+  - `backend/services/browser_manager.py` — DEPRECATED: old Podman container-based approach, replaced by wayland_manager.py
   - `backend/services/monitor.py` — psutil-based CPU/RAM/network monitoring, per-PID stats
 
 ### Frontend (React SPA)
@@ -36,15 +37,18 @@ Mediacaster is a web-based MPEG-TS multicast playout system. Users upload media 
   - `Login.jsx`, `ChangePassword.jsx`
 - **Styles:** `frontend/src/styles/app.css` — dark broadcast engineering aesthetic
 
-### Browser Source Container
-- **Containerfile:** `container/Containerfile` — AlmaLinux 9 base with Xvfb, Firefox, x11vnc, xdotool, websockify, noVNC, ffmpeg, PulseAudio
-- **Entrypoint:** `container/entrypoint.sh` — launches full stack: Xvfb → Firefox kiosk → x11vnc → websockify → ffmpeg x11grab → MPEG-TS UDP multicast. Optional PulseAudio audio capture.
-- Container is needed because AlmaLinux 10 dropped the X11 server stack entirely (Wayland-only)
+### Browser/Presentation Source Capture (Native Wayland Pipeline)
+- **Manager:** `backend/services/wayland_manager.py` — manages native Wayland process groups per stream (replaces container-based approach)
+- **Pipeline:** weston headless → Firefox/LibreOffice → wf-recorder (screencopy) → ffmpeg (encode) → MPEG-TS UDP multicast
+- **VNC Preview:** wayvnc + websockify → noVNC iframe in the UI
+- **Input:** ydotool for presentation slide control (replaces xdotool)
+- **Legacy:** `container/` directory contains the old Podman-based entrypoint and Containerfile (deprecated)
+- wf-recorder and ydotool are source-built (not available as RPMs on AL10)
 
 ### Infrastructure
-- **deploy.sh** — full AlmaLinux deployment (repos, packages, podman, venv, frontend build, container image build, systemd, nginx, firewall, SELinux, multicast routing, sudoers)
+- **deploy.sh** — full AlmaLinux deployment (repos, packages, Wayland stack, wf-recorder/ydotool source builds, venv, frontend build, systemd, nginx, firewall, SELinux, multicast routing)
 - **nginx/multicast-streamer.conf** — reverse proxy for API + static frontend. noVNC iframe connects directly to the websockify port (6080-6180 range opened in firewall).
-- **systemd/multicast-streamer.service** — runs as `mcs` user, `ExecStartPre=+` for /run/user creation, relaxed sandboxing for Podman
+- **systemd/multicast-streamer.service** — runs as `mcs` user, `ExecStartPre=+` for /run/user creation, ReadWritePaths includes /run/user for Wayland sockets
 - **requirements.txt** — fastapi, uvicorn, sqlalchemy, alembic, psycopg2-binary, python-jose, passlib, bcrypt<4.1, python-multipart, aiofiles, psutil
 
 ## RBAC Model
@@ -64,7 +68,7 @@ Mediacaster is a web-based MPEG-TS multicast playout system. Users upload media 
 - **Server IP:** 10.193.1.115 (current dev instance)
 - **Service account:** `mcs`
 - **App directory:** `/opt/multicast-streamer/`
-- **Podman:** 5.6.0, containers run via `sudo podman` (sudoers at `/etc/sudoers.d/mcs-podman`)
+- **Wayland stack:** weston (headless), wayvnc, wf-recorder (source-built), ydotool (source-built), websockify
 - **SELinux:** enforcing — requires `httpd_can_network_connect=1`, port labeling for 6080-6180 (noVNC) and 5950-6050 (VNC)
 - **Firewall:** ports 80, 443, 6080-6180/tcp, 5950-6050/tcp open. Multicast 239.0.0.0/8 allowed.
 
@@ -98,8 +102,8 @@ Mediacaster is a web-based MPEG-TS multicast playout system. Users upload media 
 - `bcrypt` must be pinned `<4.1` — passlib 1.7.4 crashes with bcrypt 4.1+
 - Thumbnails/previews served without auth (img tags can't send JWT headers)
 - Schema migrations handled by Alembic (`alembic/` directory, `alembic.ini`)
-- Container user is `browseruser` (not root) — `podman exec` commands need to account for this
-- `deploy.sh` runs as root, builds container image as root, service runs as `mcs` with `sudo podman`
+- wf-recorder and ydotool are source-built to `/usr/local/bin/` (not available as RPMs)
+- `deploy.sh` runs as root, service runs as `mcs` user
 - The `mcs` system user has `/sbin/nologin` shell — use `sudo -u mcs` for git operations
 
 ## Git Workflow
