@@ -130,7 +130,8 @@ dnf install -y weston wayvnc firefox python3-websockify
 # Build dependencies for wf-recorder and ydotool (source builds)
 log_info "Installing build dependencies for wf-recorder and ydotool..."
 dnf install -y gcc gcc-c++ meson ninja-build cmake scdoc \
-    wlroots-devel wayland-devel ffmpeg-devel libdrm-devel pulseaudio-libs-devel
+    wlroots-devel wayland-devel wayland-protocols-devel ffmpeg-devel \
+    libdrm-devel pulseaudio-libs-devel
 
 # Build wf-recorder from source — wlroots screencopy-based screen recorder.
 # Not available as an RPM on AlmaLinux 10. Used to capture weston's output
