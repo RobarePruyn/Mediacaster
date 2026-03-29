@@ -318,6 +318,7 @@ user_pref("dom.disable_window_move_resize", false);
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
             env=env,
+            cwd=str(config.BASE_DIR),
         )
 
         # Wait for Firefox to initialize and create its window
@@ -341,8 +342,10 @@ user_pref("dom.disable_window_move_resize", false);
         (Right/Left/Space/Escape) via ydotool.
         """
         env = self._base_env(managed)
-        # Force GTK3 VCL plugin for Wayland support
+        # Force GTK3 VCL plugin and Wayland GDK backend — without GDK_BACKEND=wayland,
+        # GTK3 tries X11 first and fails with "no suitable windowing system found"
         env["SAL_USE_VCLPLUGIN"] = "gtk3"
+        env["GDK_BACKEND"] = "wayland"
 
         lo_cmd = [
             config.LIBREOFFICE_PATH,
@@ -357,6 +360,7 @@ user_pref("dom.disable_window_move_resize", false);
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
             env=env,
+            cwd=str(config.BASE_DIR),
         )
 
         # LibreOffice is slower to start than Firefox — wait longer
