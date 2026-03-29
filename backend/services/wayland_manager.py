@@ -316,7 +316,7 @@ user_pref("dom.disable_window_move_resize", false);
         managed.app_proc = await asyncio.create_subprocess_exec(
             *firefox_cmd,
             stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
             env=env,
         )
 
@@ -324,7 +324,9 @@ user_pref("dom.disable_window_move_resize", false);
         await asyncio.sleep(4)
 
         if managed.app_proc.returncode is not None:
-            logger.error("Firefox exited prematurely (rc=%d)", managed.app_proc.returncode)
+            stderr = await managed.app_proc.stderr.read()
+            logger.error("Firefox exited prematurely (rc=%d): %s",
+                         managed.app_proc.returncode, stderr.decode()[:500])
             return False
 
         logger.info("Firefox started: pid=%d", managed.app_proc.pid)
@@ -353,7 +355,7 @@ user_pref("dom.disable_window_move_resize", false);
         managed.app_proc = await asyncio.create_subprocess_exec(
             *lo_cmd,
             stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
             env=env,
         )
 
@@ -361,7 +363,9 @@ user_pref("dom.disable_window_move_resize", false);
         await asyncio.sleep(6)
 
         if managed.app_proc.returncode is not None:
-            logger.error("LibreOffice exited prematurely (rc=%d)", managed.app_proc.returncode)
+            stderr = await managed.app_proc.stderr.read()
+            logger.error("LibreOffice exited prematurely (rc=%d): %s",
+                         managed.app_proc.returncode, stderr.decode()[:500])
             return False
 
         logger.info("LibreOffice Impress started: pid=%d", managed.app_proc.pid)

@@ -28,6 +28,10 @@ Environment="PATH=/opt/multicast-streamer/venv/bin:/usr/local/bin:/usr/bin"
 Environment="PYTHONPATH=/opt/multicast-streamer"
 # HOME is needed by various Python libraries that look for ~/.config
 Environment="HOME=/opt/multicast-streamer"
+# Disable Python output buffering so log messages appear immediately in journald.
+# Without this, Python buffers writes to the journald pipe and application logs
+# (wayland_manager, stream_manager, routes) never appear until the buffer fills.
+Environment="PYTHONUNBUFFERED=1"
 # XDG_RUNTIME_DIR is required by weston for Wayland display sockets.
 # Each capture source creates a subdirectory (mcs-50/, mcs-51/, etc.) for
 # its own isolated weston instance. %U expands to the UID of User= above.
