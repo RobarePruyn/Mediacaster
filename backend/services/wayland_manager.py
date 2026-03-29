@@ -242,9 +242,13 @@ class WaylandManager:
                 return True
             # Check if weston exited prematurely
             if managed.weston_proc.returncode is not None:
-                stderr = await managed.weston_proc.stderr.read()
-                logger.error("Weston exited prematurely (rc=%d): %s",
-                             managed.weston_proc.returncode, stderr.decode()[:500])
+                try:
+                    stderr = await asyncio.wait_for(managed.weston_proc.stderr.read(), timeout=3)
+                    logger.error("Weston exited prematurely (rc=%d): %s",
+                                 managed.weston_proc.returncode, stderr.decode()[:500])
+                except asyncio.TimeoutError:
+                    logger.error("Weston exited prematurely (rc=%d), stderr read timed out",
+                                 managed.weston_proc.returncode)
                 return False
 
         logger.error("Timed out waiting for weston socket at %s", socket_path)
@@ -325,9 +329,13 @@ user_pref("dom.disable_window_move_resize", false);
         await asyncio.sleep(4)
 
         if managed.app_proc.returncode is not None:
-            stderr = await managed.app_proc.stderr.read()
-            logger.error("Firefox exited prematurely (rc=%d): %s",
-                         managed.app_proc.returncode, stderr.decode()[:500])
+            try:
+                stderr = await asyncio.wait_for(managed.app_proc.stderr.read(), timeout=3)
+                logger.error("Firefox exited prematurely (rc=%d): %s",
+                             managed.app_proc.returncode, stderr.decode()[:500])
+            except asyncio.TimeoutError:
+                logger.error("Firefox exited prematurely (rc=%d), stderr read timed out",
+                             managed.app_proc.returncode)
             return False
 
         logger.info("Firefox started: pid=%d", managed.app_proc.pid)
@@ -367,9 +375,13 @@ user_pref("dom.disable_window_move_resize", false);
         await asyncio.sleep(6)
 
         if managed.app_proc.returncode is not None:
-            stderr = await managed.app_proc.stderr.read()
-            logger.error("LibreOffice exited prematurely (rc=%d): %s",
-                         managed.app_proc.returncode, stderr.decode()[:500])
+            try:
+                stderr = await asyncio.wait_for(managed.app_proc.stderr.read(), timeout=3)
+                logger.error("LibreOffice exited prematurely (rc=%d): %s",
+                             managed.app_proc.returncode, stderr.decode()[:500])
+            except asyncio.TimeoutError:
+                logger.error("LibreOffice exited prematurely (rc=%d), stderr read timed out",
+                             managed.app_proc.returncode)
             return False
 
         logger.info("LibreOffice Impress started: pid=%d", managed.app_proc.pid)
