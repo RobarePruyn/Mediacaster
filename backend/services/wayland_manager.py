@@ -1069,11 +1069,11 @@ user_pref("dom.disable_window_move_resize", false);
 
     async def _send_key_x11(self, managed: ManagedSource,
                             stream_id: int, key: str) -> bool:
-        """Send a key event via X11 XTEST extension using ctypes.
+        """Send a key event via XSendEvent to the LibreOffice presenting window.
 
-        Connects to the XWayland display and uses XTestFakeKeyEvent to inject
-        a key press/release. This works for XWayland clients (LibreOffice)
-        where Wayland virtual keyboard events don't reach.
+        XWayland exposes the XTEST extension but does not actually process its
+        events. XSendEvent delivers KeyPress/KeyRelease directly to the target
+        window, which XWayland does honor.
         """
         import ctypes
 
@@ -1099,9 +1099,28 @@ user_pref("dom.disable_window_move_resize", false);
 
         display_str = f":{managed.x_display}"
 
+        # XKeyEvent structure matching Xlib's layout (x86_64)
+        class XKeyEvent(ctypes.Structure):
+            _fields_ = [
+                ("type", ctypes.c_int),
+                ("serial", ctypes.c_ulong),
+                ("send_event", ctypes.c_int),
+                ("display", ctypes.c_void_p),
+                ("window", ctypes.c_ulong),
+                ("root", ctypes.c_ulong),
+                ("subwindow", ctypes.c_ulong),
+                ("time", ctypes.c_ulong),
+                ("x", ctypes.c_int),
+                ("y", ctypes.c_int),
+                ("x_root", ctypes.c_int),
+                ("y_root", ctypes.c_int),
+                ("state", ctypes.c_uint),
+                ("keycode", ctypes.c_uint),
+                ("same_screen", ctypes.c_int),
+            ]
+
         try:
             xlib = ctypes.cdll.LoadLibrary("libX11.so.6")
-            xtst = ctypes.cdll.LoadLibrary("libXtst.so.6")
 
             # Declare proper function signatures — critical on x86_64 where
             # pointers are 64-bit but ctypes defaults to 32-bit int args.
@@ -1129,9 +1148,11 @@ user_pref("dom.disable_window_move_resize", false);
             xlib.XSetInputFocus.argtypes = [
                 ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong,
             ]
-            xtst.XTestFakeKeyEvent.argtypes = [
-                ctypes.c_void_p, ctypes.c_uint, ctypes.c_int, ctypes.c_ulong
+            xlib.XSendEvent.argtypes = [
+                ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int,
+                ctypes.c_long, ctypes.c_void_p,
             ]
+            xlib.XSendEvent.restype = ctypes.c_int
 
             display = xlib.XOpenDisplay(display_str.encode())
             if not display:
@@ -1140,9 +1161,9 @@ user_pref("dom.disable_window_move_resize", false);
                 return False
 
             try:
-                # Find the "Presenting:" window and set focus to it.
-                # Without explicit focus, XTEST events go to window 0 (nowhere).
                 root = xlib.XDefaultRootWindow(display)
+
+                # Find the "Presenting:" window
                 root_ret = ctypes.c_ulong()
                 parent = ctypes.c_ulong()
                 children = ctypes.POINTER(ctypes.c_ulong)()
@@ -1166,10 +1187,13 @@ user_pref("dom.disable_window_move_resize", false);
                 if nchildren.value > 0:
                     xlib.XFree(children)
 
-                if presenting_win:
-                    # RevertToParent = 2, CurrentTime = 0
-                    xlib.XSetInputFocus(display, presenting_win, 2, 0)
-                    xlib.XFlush(display)
+                if not presenting_win:
+                    logger.warning("No 'Presenting:' window found on display %s "
+                                   "for stream %d", display_str, stream_id)
+                    return False
+
+                # Set focus to the presenting window first
+                xlib.XSetInputFocus(display, presenting_win, 2, 0)
 
                 keycode = xlib.XKeysymToKeycode(display, keysym)
                 if keycode == 0:
@@ -1177,15 +1201,44 @@ user_pref("dom.disable_window_move_resize", false);
                                    keysym, display_str)
                     return False
 
-                logger.info("X11 XTEST: key='%s' keysym=0x%x keycode=%d display=%s "
-                           "stream=%d focus_win=%s",
-                           key, keysym, keycode, display_str, stream_id,
-                           presenting_win or "none")
+                # X11 constants
+                KEY_PRESS = 2
+                KEY_RELEASE = 3
+                KEY_PRESS_MASK = (1 << 0)
+                KEY_RELEASE_MASK = (1 << 1)
 
-                # XTEST: press then release
-                xtst.XTestFakeKeyEvent(display, keycode, 1, 0)
-                xtst.XTestFakeKeyEvent(display, keycode, 0, 0)
+                # Build and send KeyPress event
+                ev = XKeyEvent()
+                ev.type = KEY_PRESS
+                ev.serial = 0
+                ev.send_event = 1
+                ev.display = display
+                ev.window = presenting_win
+                ev.root = root
+                ev.subwindow = 0
+                ev.time = 0
+                ev.x = 1
+                ev.y = 1
+                ev.x_root = 1
+                ev.y_root = 1
+                ev.state = 0
+                ev.keycode = keycode
+                ev.same_screen = 1
+
+                xlib.XSendEvent(display, presenting_win, 0,
+                                KEY_PRESS_MASK, ctypes.byref(ev))
+
+                # Send KeyRelease
+                ev.type = KEY_RELEASE
+                xlib.XSendEvent(display, presenting_win, 0,
+                                KEY_RELEASE_MASK, ctypes.byref(ev))
+
                 xlib.XFlush(display)
+
+                logger.info("X11 XSendEvent: key='%s' keysym=0x%x keycode=%d "
+                           "display=%s stream=%d win=%d",
+                           key, keysym, keycode, display_str, stream_id,
+                           presenting_win)
             finally:
                 xlib.XCloseDisplay(display)
 
@@ -1193,8 +1246,6 @@ user_pref("dom.disable_window_move_resize", false);
             logger.warning("X11 key send failed for stream %d: %s", stream_id, exc)
             return False
 
-        logger.debug("Sent X11 key '%s' (keysym 0x%x) to stream %d via DISPLAY=%s",
-                     key, keysym, stream_id, display_str)
         return True
 
     async def _send_key_wtype(self, managed: ManagedSource,
