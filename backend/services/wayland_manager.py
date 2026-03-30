@@ -618,9 +618,13 @@ user_pref("dom.disable_window_move_resize", false);
         """
         env = self._base_env(managed)
 
-        # Start wayvnc — binds to all interfaces on the allocated VNC port
+        # Start wayvnc — binds to all interfaces on the allocated VNC port.
+        # --disable-input is required because weston's headless backend doesn't
+        # support the zwp_virtual_pointer_manager_v1 protocol that wayvnc uses
+        # for mouse/keyboard input. Input injection is handled by ydotool instead.
         wayvnc_cmd = [
             config.WAYVNC_PATH,
+            "--disable-input",
             "0.0.0.0", str(managed.vnc_port),
         ]
 
