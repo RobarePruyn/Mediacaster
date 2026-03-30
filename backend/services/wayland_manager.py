@@ -585,6 +585,7 @@ user_pref("dom.disable_window_move_resize", false);
         wf_cmd = [
             config.WF_RECORDER_PATH,
             "-y",
+            "--no-dmabuf",  # pixman renderer can't provide DMA-BUF — force SHM
             "--muxer", "rawvideo",
             "--codec", "rawvideo",
             "--pixel-format", "bgr0",
