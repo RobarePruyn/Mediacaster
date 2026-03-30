@@ -267,7 +267,8 @@ class AssetRenditionResponse(BaseModel):
 class StreamCreate(BaseModel):
     """Request to create a new multicast stream (admin only)."""
     name: str = Field(default="Default Stream", max_length=256)
-    multicast_address: str = Field(default="239.1.1.1")
+    # Empty string means "auto-assign next available address"
+    multicast_address: str = Field(default="")
     # Port range 1024-65535 to avoid privileged ports
     multicast_port: int = Field(default=5000, ge=1024, le=65535)
     playback_mode: str = Field(default="loop")

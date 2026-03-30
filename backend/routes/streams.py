@@ -166,6 +166,38 @@ def create_stream(body: StreamCreate, db: Session = Depends(get_db),
     if not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Admin privileges required")
 
+    # Auto-assign next available multicast address if none provided.
+    # Starts at 239.1.1.1 and increments the last octet, wrapping through
+    # the third and second octets within the 239.0.0.0/8 admin-scoped range.
+    if not body.multicast_address:
+        base_parts = [239, 1, 1, 1]
+        used_addresses = {
+            s.multicast_address
+            for s in db.query(Stream.multicast_address).filter(
+                Stream.multicast_port == body.multicast_port
+            ).all()
+        }
+        found = False
+        # Search up to 65025 addresses (255*255*1) in the 239.x.x.x range
+        for _ in range(255 * 255):
+            candidate = ".".join(str(o) for o in base_parts)
+            if candidate not in used_addresses:
+                body.multicast_address = candidate
+                found = True
+                break
+            # Increment: last octet, then third, then second
+            base_parts[3] += 1
+            if base_parts[3] > 254:
+                base_parts[3] = 1
+                base_parts[2] += 1
+                if base_parts[2] > 254:
+                    base_parts[2] = 1
+                    base_parts[1] += 1
+                    if base_parts[1] > 254:
+                        break
+        if not found:
+            raise HTTPException(status_code=409, detail="No available multicast addresses")
+
     # Prevent two streams from sharing the same multicast address:port —
     # two ffmpeg processes writing to the same group corrupt each other's output
     conflict = db.query(Stream).filter(

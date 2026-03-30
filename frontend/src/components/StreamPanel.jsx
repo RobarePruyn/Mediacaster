@@ -182,7 +182,7 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
       const defaultNames = { playlist: 'New Stream', browser: 'Browser Source', presentation: 'Presentation' };
       const newStream = await createStream({
         name: defaultNames[newSourceType] || 'New Stream',
-        multicast_address: '239.1.1.1', multicast_port: 5000,
+        multicast_address: '', multicast_port: 5000,
         playback_mode: 'loop', source_type: newSourceType,
         resolution: '1920x1080', codec: 'h264', framerate: 30,
       });
