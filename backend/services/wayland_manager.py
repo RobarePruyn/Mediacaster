@@ -361,12 +361,12 @@ user_pref("dom.disable_window_move_resize", false);
         Returns (cmd_list, env_dict) for use with _start_cage().
         """
         env = {
-            # Use GTK3 VCL plugin with Wayland backend for LibreOffice.
-            # Keep a dummy DISPLAY as a fallback — GTK3's initialization may still
-            # check for it even when GDK_BACKEND=wayland is set.
-            "SAL_USE_VCLPLUGIN": "gtk3",
-            "GDK_BACKEND": "wayland",
-            "DISPLAY": ":99",
+            # Use the generic X11 VCL plugin connecting through XWayland.
+            # The TDF LibreOffice build bundles its own GTK libraries which may
+            # lack Wayland support ("no suitable windowing system found").
+            # cage's XWayland integration provides a DISPLAY that soffice.bin
+            # can connect to via the standard X11 path.
+            "SAL_USE_VCLPLUGIN": "gen",
         }
 
         # Call soffice.bin directly to bypass the oosplash launcher wrapper.
