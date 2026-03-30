@@ -374,22 +374,11 @@ user_pref("dom.disable_window_move_resize", false);
             "XWAYLAND_NO_GLAMOR": "1",
         }
 
-        # Call soffice.bin directly to bypass the oosplash launcher wrapper.
-        # The default /usr/bin/libreoffice → oosplash chain tries to actually
-        # connect to the X11 DISPLAY (not just check the env var), which fails
-        # in a headless Wayland-only environment. soffice.bin skips that check
-        # and honors SAL_USE_VCLPLUGIN + GDK_BACKEND directly.
-        soffice_bin = config.LIBREOFFICE_PATH.replace("/soffice", "/soffice.bin")
-        if not soffice_bin.endswith(".bin"):
-            # Fallback: if LIBREOFFICE_PATH doesn't end with /soffice (e.g. /usr/bin/libreoffice),
-            # look for soffice.bin alongside it or in the standard TDF install path
-            candidate = Path(config.LIBREOFFICE_PATH).parent / "soffice.bin"
-            if not candidate.exists():
-                # TDF builds install to /opt/libreofficeXX.Y/program/
-                for tdf_dir in sorted(Path("/opt").glob("libreoffice*/program/soffice.bin"), reverse=True):
-                    candidate = tdf_dir
-                    break
-            soffice_bin = str(candidate) if candidate.exists() else config.LIBREOFFICE_PATH
+        # Use the soffice wrapper script (not soffice.bin directly).
+        # The wrapper sets up LD_LIBRARY_PATH and other env vars that soffice.bin
+        # needs. Now that cage provides a working XWayland display (DISPLAY=:0)
+        # via XWAYLAND_NO_GLAMOR, the oosplash launcher can connect to it.
+        soffice_cmd = config.LIBREOFFICE_PATH
 
         # Create a LibreOffice user profile that skips the first-run wizard.
         # The --nofirststartwizard flag doesn't suppress it in newer TDF builds;
@@ -413,14 +402,14 @@ user_pref("dom.disable_window_move_resize", false);
 """)
 
         cmd = [
-            soffice_bin,
+            soffice_cmd,
             "--norestore",
             "--nofirststartwizard",
             f"-env:UserInstallation=file://{lo_profile}",
             "--show", file_path,
         ]
 
-        logger.info("LibreOffice command prepared: %s (binary: %s)", file_path, soffice_bin)
+        logger.info("LibreOffice command prepared: %s (binary: %s)", file_path, soffice_cmd)
         return cmd, env
 
     async def _start_audio(self, managed: ManagedSource) -> Optional[str]:
