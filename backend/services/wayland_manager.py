@@ -368,10 +368,13 @@ user_pref("dom.disable_window_move_resize", false);
         (Right/Left/Space/Escape) via ydotool.
         """
         env = self._base_env(managed)
-        # Use GTK4 VCL plugin — GTK4 is Wayland-native and doesn't fall back to X11.
-        # GTK3 with GDK_BACKEND=wayland still produces "Failed to open display" because
-        # LibreOffice's VCL layer checks for X11 DISPLAY before GTK3 Wayland init.
-        env["SAL_USE_VCLPLUGIN"] = "gtk4"
+        # Use GTK3 VCL plugin with Wayland backend for LibreOffice on weston.
+        # A dummy DISPLAY must be set because LibreOffice's oosplash launcher and
+        # VCL initialization check for DISPLAY even when using Wayland — "Failed to
+        # open display" occurs if DISPLAY is unset, regardless of SAL_USE_VCLPLUGIN.
+        env["SAL_USE_VCLPLUGIN"] = "gtk3"
+        env["GDK_BACKEND"] = "wayland"
+        env["DISPLAY"] = ":99"
 
         lo_cmd = [
             config.LIBREOFFICE_PATH,
@@ -649,8 +652,8 @@ user_pref("dom.disable_window_move_resize", false);
                              managed.websockify_proc.returncode)
             return False
 
-        logger.info("VNC preview ready: wayvnc(pid=%d) websockify(pid=%d)",
-                     managed.wayvnc_proc.pid, managed.websockify_proc.pid)
+        logger.info("VNC preview ready: weston-vnc on port %d, websockify(pid=%d) on port %d",
+                     managed.vnc_port, managed.websockify_proc.pid, managed.novnc_port)
         return True
 
     async def _start_ydotoold(self, managed: ManagedSource) -> bool:
