@@ -386,6 +386,27 @@ user_pref("dom.disable_window_move_resize", false);
                     break
             soffice_bin = str(candidate) if candidate.exists() else config.LIBREOFFICE_PATH
 
+        # Create a LibreOffice user profile that skips the first-run wizard.
+        # The --nofirststartwizard flag doesn't suppress it in newer TDF builds;
+        # the wizard checks for a registrymodifications.xcu file in the user profile.
+        lo_profile = os.path.join(managed.runtime_dir, "lo_profile")
+        lo_user_dir = os.path.join(lo_profile, "user")
+        os.makedirs(lo_user_dir, exist_ok=True)
+        # Write a minimal registrymodifications.xcu that marks first-run as complete
+        reg_file = os.path.join(lo_user_dir, "registrymodifications.xcu")
+        with open(reg_file, "w") as f:
+            f.write("""<?xml version="1.0" encoding="UTF-8"?>
+<oor:items xmlns:oor="http://openoffice.org/2001/registry"
+           xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+<item oor:path="/org.openoffice.Setup/Product">
+  <prop oor:name="ooSetupLastVersion" oor:op="fuse">
+    <value>26.2</value>
+  </prop>
+</item>
+</oor:items>
+""")
+
         # Wrap soffice.bin in a shell script that waits for XWayland to be ready.
         # cage starts XWayland asynchronously — if soffice.bin runs immediately,
         # it may fail with "no suitable windowing system found" because the X11
@@ -401,7 +422,7 @@ for i in $(seq 1 20); do
     fi
     sleep 0.25
 done
-exec {soffice_bin} --norestore --nofirststartwizard --show '{file_path}'
+exec {soffice_bin} --norestore --nofirststartwizard -env:UserInstallation=file://{lo_profile} --show '{file_path}'
 """)
         os.chmod(wrapper_script, 0o755)
 
