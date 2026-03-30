@@ -92,7 +92,9 @@ class ManagedSource:
         self.display_number = display_number
         # Per-stream isolated runtime directory for Wayland sockets
         self.runtime_dir: str = ""
-        self.wayland_display: str = f"wayland-{display_number}"
+        # cage uses wl_display_add_socket_auto() which creates wayland-0 in the
+        # isolated XDG_RUNTIME_DIR. All child processes use this socket name.
+        self.wayland_display: str = "wayland-0"
 
         # Native process handles (asyncio.subprocess.Process)
         self.weston_proc: Optional[asyncio.subprocess.Process] = None
@@ -240,13 +242,14 @@ class WaylandManager:
         env["WLR_BACKENDS"] = "headless"
         # Create exactly one virtual output
         env["WLR_HEADLESS_OUTPUTS"] = "1"
+        # Force pixman (software) renderer — no GPU/DRM render node on headless servers
+        env["WLR_RENDERER"] = "pixman"
         # Merge any application-specific env vars (e.g., MOZ_ENABLE_WAYLAND for Firefox)
         if app_env:
             env.update(app_env)
 
         cage_cmd = [
             config.CAGE_PATH,
-            "-s", managed.wayland_display,
             "--",
         ] + app_cmd
 
