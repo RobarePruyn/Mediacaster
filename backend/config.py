@@ -137,6 +137,7 @@ FFPROBE_PATH = os.getenv("MCS_FFPROBE_PATH", "/usr/bin/ffprobe")
 # source capture. wf-recorder and ydotool are source-built to /usr/local/bin
 # since they're not available as RPMs on AlmaLinux 10.
 WESTON_PATH = os.getenv("MCS_WESTON_PATH", "/usr/bin/weston")
+CAGE_PATH = os.getenv("MCS_CAGE_PATH", "/usr/local/bin/cage")
 WF_RECORDER_PATH = os.getenv("MCS_WF_RECORDER_PATH", "/usr/local/bin/wf-recorder")
 WAYVNC_PATH = os.getenv("MCS_WAYVNC_PATH", "/usr/bin/wayvnc")
 YDOTOOL_PATH = os.getenv("MCS_YDOTOOL_PATH", "/usr/local/bin/ydotool")

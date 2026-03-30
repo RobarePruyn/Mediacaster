@@ -12,8 +12,8 @@ Manages two source types that share the same capture pipeline:
   PRESENTATION: LibreOffice Impress renders a slideshow natively
 
 Each source runs as an isolated set of native processes:
-    - weston --backend=headless (Wayland compositor per stream)
-    - Firefox or LibreOffice Impress (content renderer)
+    - cage (wlroots kiosk compositor running the app fullscreen)
+    - Firefox or LibreOffice Impress (launched by cage as its client)
     - wf-recorder (wlroots screencopy → raw video pipe)
     - ffmpeg (encode + mux → MPEG-TS UDP multicast)
     - wayvnc (VNC server for interactive preview)
@@ -21,7 +21,7 @@ Each source runs as an isolated set of native processes:
     - ydotoold (input injection daemon, presentation sources only)
 
 Process isolation is achieved through per-stream XDG_RUNTIME_DIR directories
-and unique Wayland display sockets. Each stream gets its own weston compositor
+and unique Wayland display sockets. Each stream gets its own cage compositor
 instance, preventing cross-stream interference.
 
 Port allocation scheme (unchanged from container-based approach):
@@ -33,6 +33,7 @@ Port allocation scheme (unchanged from container-based approach):
 import asyncio
 import logging
 import os
+from pathlib import Path
 import shutil
 import signal
 import subprocess
@@ -186,9 +187,9 @@ class WaylandManager:
         return managed.novnc_port if managed else None
 
     def _create_runtime_dir(self, display_num: int) -> str:
-        """Create an isolated XDG_RUNTIME_DIR for a weston instance.
+        """Create an isolated XDG_RUNTIME_DIR for a compositor instance.
 
-        Each weston compositor needs its own XDG_RUNTIME_DIR to create a
+        Each cage compositor needs its own XDG_RUNTIME_DIR to create a
         unique Wayland socket without colliding with other instances. The
         directory is created under the mcs user's runtime dir.
         """
@@ -211,77 +212,89 @@ class WaylandManager:
         """Build the base environment for all child processes of a source.
 
         All processes need the same XDG_RUNTIME_DIR and WAYLAND_DISPLAY to
-        connect to the correct weston compositor instance.
+        connect to the correct cage compositor instance.
         """
         env = os.environ.copy()
         env["XDG_RUNTIME_DIR"] = managed.runtime_dir
         env["WAYLAND_DISPLAY"] = managed.wayland_display
-        # Ensure weston and other tools can find their libraries
+        # Ensure cage and other tools can find their libraries
         env["HOME"] = os.path.expanduser("~")
         return env
 
-    async def _start_weston(self, managed: ManagedSource, resolution: str) -> bool:
-        """Launch a headless weston compositor for this stream.
+    async def _start_cage(self, managed: ManagedSource, resolution: str,
+                          app_cmd: list, app_env: dict = None) -> bool:
+        """Launch a headless cage compositor with the given application.
 
-        Must use the headless backend because wf-recorder requires the
-        wlr-screencopy-unstable-v1 protocol which only headless supports.
-        VNC preview is handled separately by wayvnc (best-effort).
+        cage is a wlroots-based kiosk compositor that runs a single application
+        fullscreen. Using cage instead of weston because wf-recorder requires the
+        wlr-screencopy-unstable-v1 protocol, which is a wlroots extension that
+        weston does not implement.
 
-        Returns True if weston started and the Wayland socket appeared.
+        The application command is passed directly to cage — cage starts the
+        compositor and launches the app as one unit.
+
+        Returns True if cage started and the Wayland socket appeared.
         """
-        width, height = resolution.split("x")
-
         env = self._base_env(managed)
-        weston_cmd = [
-            config.WESTON_PATH,
-            f"--backend=headless",
-            f"--width={width}",
-            f"--height={height}",
-            f"--socket={managed.wayland_display}",
-        ]
+        # Tell wlroots to use the headless backend (no physical display needed)
+        env["WLR_BACKENDS"] = "headless"
+        # Create exactly one virtual output
+        env["WLR_HEADLESS_OUTPUTS"] = "1"
+        # Merge any application-specific env vars (e.g., MOZ_ENABLE_WAYLAND for Firefox)
+        if app_env:
+            env.update(app_env)
 
-        logger.info("Starting weston: %s (runtime=%s)", " ".join(weston_cmd), managed.runtime_dir)
+        cage_cmd = [
+            config.CAGE_PATH,
+            "-s", managed.wayland_display,
+            "--",
+        ] + app_cmd
+
+        logger.info("Starting cage: %s (runtime=%s)", " ".join(cage_cmd), managed.runtime_dir)
         managed.weston_proc = await asyncio.create_subprocess_exec(
-            *weston_cmd,
+            *cage_cmd,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
             env=env,
         )
 
-        # Wait for the Wayland socket to appear (indicates weston is ready)
+        # Wait for the Wayland socket to appear (indicates cage is ready)
         socket_path = os.path.join(managed.runtime_dir, managed.wayland_display)
-        for attempt in range(20):
+        for attempt in range(30):
             await asyncio.sleep(0.25)
             if os.path.exists(socket_path):
-                logger.info("Weston ready: socket=%s pid=%d", socket_path, managed.weston_proc.pid)
+                logger.info("Cage ready: socket=%s pid=%d", socket_path, managed.weston_proc.pid)
                 return True
-            # Check if weston exited prematurely
+            # Check if cage exited prematurely
             if managed.weston_proc.returncode is not None:
                 try:
                     stderr = await asyncio.wait_for(managed.weston_proc.stderr.read(), timeout=3)
-                    logger.error("Weston exited prematurely (rc=%d): %s",
+                    logger.error("Cage exited prematurely (rc=%d): %s",
                                  managed.weston_proc.returncode, stderr.decode()[:500])
                 except asyncio.TimeoutError:
-                    logger.error("Weston exited prematurely (rc=%d), stderr read timed out",
+                    logger.error("Cage exited prematurely (rc=%d), stderr read timed out",
                                  managed.weston_proc.returncode)
                 return False
 
-        logger.error("Timed out waiting for weston socket at %s", socket_path)
+        logger.error("Timed out waiting for cage socket at %s", socket_path)
         return False
 
-    async def _start_firefox(self, managed: ManagedSource, url: str,
-                             resolution: str) -> bool:
-        """Launch Firefox in kiosk mode on the weston compositor.
+    def _build_firefox_cmd(self, managed: ManagedSource, url: str,
+                           resolution: str) -> tuple:
+        """Build Firefox command and env for kiosk mode.
 
         Creates a disposable profile with optimized settings for headless
         kiosk operation (no telemetry, no GPU accel, H.264 decode preference).
+
+        Returns (cmd_list, env_dict) for use with _start_cage().
         """
         width, height = resolution.split("x")
-        env = self._base_env(managed)
-        # Force Wayland backend — Firefox defaults to X11 if both are available
-        env["MOZ_ENABLE_WAYLAND"] = "1"
-        # Disable GPU compositing — no real GPU in headless weston
-        env["MOZ_WEBRENDER"] = "0"
+        env = {
+            # Force Wayland backend — Firefox defaults to X11 if both are available
+            "MOZ_ENABLE_WAYLAND": "1",
+            # Disable GPU compositing — no real GPU in headless compositor
+            "MOZ_WEBRENDER": "0",
+        }
 
         # Create a disposable profile directory
         profile_dir = os.path.join(managed.runtime_dir, "firefox_profile")
@@ -300,7 +313,7 @@ user_pref("browser.startup.homepage_override.mstone", "ignore");
 user_pref("browser.aboutConfig.showWarning", false);
 user_pref("browser.tabs.warnOnClose", false);
 user_pref("browser.sessionstore.resume_from_crash", false);
-// Disable hardware acceleration — no real GPU in headless weston
+// Disable hardware acceleration — no real GPU in headless compositor
 user_pref("layers.acceleration.disabled", true);
 user_pref("gfx.xrender.enabled", false);
 // Force H.264 for web video playback — VP9/AV1 are too CPU-expensive
@@ -324,53 +337,34 @@ user_pref("dom.disable_window_move_resize", false);
             f.write(f'user_pref("browser.window.width", {width});\n')
             f.write(f'user_pref("browser.window.height", {height});\n')
 
-        firefox_cmd = [
+        cmd = [
             config.FIREFOX_PATH,
             "--no-remote",
             "--profile", profile_dir,
             "--kiosk", url,
         ]
 
-        logger.info("Starting Firefox: %s", url)
-        managed.app_proc = await asyncio.create_subprocess_exec(
-            *firefox_cmd,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
-            cwd=str(config.BASE_DIR),
-        )
+        logger.info("Firefox command prepared: %s", url)
+        return cmd, env
 
-        # Wait for Firefox to initialize and create its window
-        await asyncio.sleep(4)
-
-        if managed.app_proc.returncode is not None:
-            try:
-                stderr = await asyncio.wait_for(managed.app_proc.stderr.read(), timeout=3)
-                logger.error("Firefox exited prematurely (rc=%d): %s",
-                             managed.app_proc.returncode, stderr.decode()[:500])
-            except asyncio.TimeoutError:
-                logger.error("Firefox exited prematurely (rc=%d), stderr read timed out",
-                             managed.app_proc.returncode)
-            return False
-
-        logger.info("Firefox started: pid=%d", managed.app_proc.pid)
-        return True
-
-    async def _start_libreoffice(self, managed: ManagedSource,
-                                  file_path: str, resolution: str) -> bool:
-        """Launch LibreOffice Impress in slideshow mode on the weston compositor.
+    def _build_libreoffice_cmd(self, managed: ManagedSource,
+                               file_path: str, resolution: str) -> tuple:
+        """Build LibreOffice Impress command and env for slideshow mode.
 
         LibreOffice's --show flag opens directly in presentation/slideshow mode.
-        The slideshow fills the weston output and responds to keyboard navigation
-        (Right/Left/Space/Escape) via ydotool.
+        The slideshow fills the compositor output and responds to keyboard
+        navigation (Right/Left/Space/Escape) via ydotool.
+
+        Returns (cmd_list, env_dict) for use with _start_cage().
         """
-        env = self._base_env(managed)
-        # Use GTK3 VCL plugin with Wayland backend for LibreOffice on weston.
-        # Keep a dummy DISPLAY as a fallback — GTK3's initialization may still
-        # check for it even when GDK_BACKEND=wayland is set.
-        env["SAL_USE_VCLPLUGIN"] = "gtk3"
-        env["GDK_BACKEND"] = "wayland"
-        env["DISPLAY"] = ":99"
+        env = {
+            # Use GTK3 VCL plugin with Wayland backend for LibreOffice.
+            # Keep a dummy DISPLAY as a fallback — GTK3's initialization may still
+            # check for it even when GDK_BACKEND=wayland is set.
+            "SAL_USE_VCLPLUGIN": "gtk3",
+            "GDK_BACKEND": "wayland",
+            "DISPLAY": ":99",
+        }
 
         # Call soffice.bin directly to bypass the oosplash launcher wrapper.
         # The default /usr/bin/libreoffice → oosplash chain tries to actually
@@ -389,37 +383,15 @@ user_pref("dom.disable_window_move_resize", false);
                     break
             soffice_bin = str(candidate) if candidate.exists() else config.LIBREOFFICE_PATH
 
-        lo_cmd = [
+        cmd = [
             soffice_bin,
             "--norestore",
             "--nofirststartwizard",
             "--show", file_path,
         ]
 
-        logger.info("Starting LibreOffice Impress: %s (binary: %s)", file_path, soffice_bin)
-        managed.app_proc = await asyncio.create_subprocess_exec(
-            *lo_cmd,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
-            cwd=str(config.BASE_DIR),
-        )
-
-        # LibreOffice is slower to start than Firefox — wait longer
-        await asyncio.sleep(6)
-
-        if managed.app_proc.returncode is not None:
-            try:
-                stderr = await asyncio.wait_for(managed.app_proc.stderr.read(), timeout=3)
-                logger.error("LibreOffice exited prematurely (rc=%d): %s",
-                             managed.app_proc.returncode, stderr.decode()[:500])
-            except asyncio.TimeoutError:
-                logger.error("LibreOffice exited prematurely (rc=%d), stderr read timed out",
-                             managed.app_proc.returncode)
-            return False
-
-        logger.info("LibreOffice Impress started: pid=%d", managed.app_proc.pid)
-        return True
+        logger.info("LibreOffice command prepared: %s (binary: %s)", file_path, soffice_bin)
+        return cmd, env
 
     async def _start_audio(self, managed: ManagedSource) -> Optional[str]:
         """Set up PulseAudio virtual sink for audio capture.
@@ -471,7 +443,7 @@ user_pref("dom.disable_window_move_resize", false);
                                        capture_audio: bool) -> bool:
         """Start the wf-recorder → ffmpeg capture and encoding pipeline.
 
-        wf-recorder captures the weston compositor's output via the wlroots
+        wf-recorder captures the cage compositor's output via the wlroots
         screencopy protocol and pipes raw video frames to ffmpeg. ffmpeg
         encodes (H.264/H.265), muxes to MPEG-TS, and sends via UDP multicast.
 
@@ -640,14 +612,14 @@ user_pref("dom.disable_window_move_resize", false);
     async def _start_vnc(self, managed: ManagedSource) -> bool:
         """Start wayvnc and websockify for VNC preview access.
 
-        wayvnc connects to the weston compositor and serves a VNC endpoint.
+        wayvnc connects to the cage compositor and serves a VNC endpoint.
         websockify bridges WebSocket connections from noVNC to wayvnc.
 
         Returns False if either fails — caller decides if this is fatal.
         """
         env = self._base_env(managed)
 
-        # Start wayvnc — --disable-input required because weston headless
+        # Start wayvnc — --disable-input avoids virtual pointer protocol issues
         # doesn't support zwp_virtual_pointer_manager_v1
         wayvnc_cmd = [
             config.WAYVNC_PATH,
@@ -800,23 +772,44 @@ user_pref("dom.disable_window_move_resize", false);
             # Step 1: Create isolated runtime directory
             managed.runtime_dir = self._create_runtime_dir(display_num)
 
-            # Step 2: Start weston headless compositor
-            if not await self._start_weston(managed, resolution):
-                raise ValueError("Weston compositor failed to start")
-
-            # Step 3: Start content application (Firefox or LibreOffice)
+            # Step 2: Build application command and environment
             if source_mode == "presentation":
-                if not await self._start_libreoffice(managed, presentation_file, resolution):
-                    raise ValueError("LibreOffice Impress failed to start")
+                app_cmd, app_env = self._build_libreoffice_cmd(
+                    managed, presentation_file, resolution)
             else:
-                if not await self._start_firefox(managed, url, resolution):
-                    raise ValueError("Firefox failed to start")
+                app_cmd, app_env = self._build_firefox_cmd(managed, url, resolution)
+
+            # Step 3: Start cage compositor with the application embedded.
+            # cage is a wlroots kiosk compositor that runs the app fullscreen.
+            # Using cage instead of weston because wf-recorder requires the
+            # wlr-screencopy-unstable-v1 protocol (a wlroots extension).
+            if not await self._start_cage(managed, resolution, app_cmd, app_env):
+                app_name = "LibreOffice Impress" if source_mode == "presentation" else "Firefox"
+                raise ValueError(f"Cage compositor with {app_name} failed to start")
+
+            # Wait for the application to initialize inside cage.
+            # LibreOffice needs more time than Firefox to render its first frame.
+            startup_wait = 8 if source_mode == "presentation" else 5
+            logger.info("Waiting %ds for application startup...", startup_wait)
+            await asyncio.sleep(startup_wait)
+
+            # Check if cage (and its app) are still running after startup wait
+            if managed.weston_proc.returncode is not None:
+                try:
+                    stderr = await asyncio.wait_for(managed.weston_proc.stderr.read(), timeout=3)
+                    logger.error("Cage+app exited during startup (rc=%d): %s",
+                                 managed.weston_proc.returncode, stderr.decode()[:500])
+                except asyncio.TimeoutError:
+                    logger.error("Cage+app exited during startup (rc=%d), stderr read timed out",
+                                 managed.weston_proc.returncode)
+                app_name = "LibreOffice Impress" if source_mode == "presentation" else "Firefox"
+                raise ValueError(f"{app_name} failed to start")
 
             # Step 4: Start VNC preview (wayvnc + websockify)
-            # Non-fatal: wayvnc 0.9.0 has a protocol mismatch with weston 14 headless
-            # (wants zxdg_output_manager_v1 v3 but headless only provides v2).
+            # Non-fatal: VNC preview is best-effort. wayvnc may fail due to
+            # protocol compatibility issues with the compositor version.
             # Streaming works fine without VNC preview — users just won't see
-            # the live preview iframe until a compatible wayvnc version is available.
+            # the live preview iframe until VNC is working.
             if not await self._start_vnc(managed):
                 logger.warning("VNC preview not available — streaming will work without preview")
 
@@ -851,8 +844,7 @@ user_pref("dom.disable_window_move_resize", false);
         # All subprocesses use stderr=PIPE for failure diagnostics, but long-running
         # processes will block if the pipe buffer fills up.
         for label, proc in [
-            ("weston", managed.weston_proc),
-            ("app", managed.app_proc),
+            ("cage", managed.weston_proc),
             ("wf-recorder", managed.wf_recorder_proc),
             ("ffmpeg", managed.ffmpeg_proc),
             ("wayvnc", managed.wayvnc_proc),
@@ -893,7 +885,7 @@ user_pref("dom.disable_window_move_resize", false);
                             multicast_address: str, multicast_port: int) -> dict:
         """Launch a native Wayland capture source for browser streaming.
 
-        Starts the full pipeline: weston → Firefox kiosk → wf-recorder → ffmpeg
+        Starts the full pipeline: cage → Firefox kiosk → wf-recorder → ffmpeg
         → MPEG-TS multicast, with wayvnc/websockify for VNC preview.
 
         Args:
@@ -1011,7 +1003,7 @@ user_pref("dom.disable_window_move_resize", false);
     async def stop_browser(self, stream_id: int):
         """Stop all processes for a capture source and clean up resources.
 
-        Terminates all native processes (weston, Firefox/LO, wf-recorder, ffmpeg,
+        Terminates all native processes (cage, Firefox/LO, wf-recorder, ffmpeg,
         wayvnc, websockify, ydotoold), removes the runtime directory, and clears
         port assignments in the database.
         """
@@ -1052,7 +1044,7 @@ user_pref("dom.disable_window_move_resize", false);
         """
         # Critical processes — if any of these die, the stream is broken
         critical_procs = [
-            ("weston", lambda: managed.weston_proc),
+            ("cage", lambda: managed.weston_proc),
             ("wf-recorder", lambda: managed.wf_recorder_proc),
             ("ffmpeg", lambda: managed.ffmpeg_proc),
         ]
