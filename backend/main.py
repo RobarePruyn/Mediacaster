@@ -80,20 +80,21 @@ async def lifespan(app: FastAPI):
              so route handlers can access them via request.app.state.
     """
     # --- Startup ---
-    # Fix logging after uvicorn's dictConfig runs. uvicorn's default logging
-    # setup calls dictConfig with disable_existing_loggers=True, which sets
-    # logger.disabled=True on ALL loggers created at import time (main,
-    # wayland_manager, stream_manager, etc.). basicConfig(force=True) replaces
-    # root handlers but does NOT clear the disabled flag. We must do both.
+    logger.info("Running database migrations...")
+    _run_alembic_migrations()
+
+    # Fix logging after ALL config-based logging setup is complete. Both uvicorn
+    # and Alembic call dictConfig/fileConfig with disable_existing_loggers=True,
+    # which sets logger.disabled=True on ALL loggers created at import time.
+    # This must run AFTER _run_alembic_migrations() since Alembic's fileConfig
+    # re-disables loggers. basicConfig(force=True) replaces root handlers;
+    # the loop clears the disabled flag on every named logger.
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
                         force=True)
     for existing_logger in [logging.getLogger(name)
                             for name in logging.Logger.manager.loggerDict]:
         existing_logger.disabled = False
-
-    logger.info("Running database migrations...")
-    _run_alembic_migrations()
 
     db = SessionLocal()
     try:
