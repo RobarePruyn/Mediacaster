@@ -221,12 +221,11 @@ class WaylandManager:
         return env
 
     async def _start_weston(self, managed: ManagedSource, resolution: str) -> bool:
-        """Launch weston with VNC backend for this stream.
+        """Launch a headless weston compositor for this stream.
 
-        Uses weston's built-in VNC backend instead of headless + separate wayvnc.
-        This eliminates the zxdg_output_manager_v1 version mismatch between
-        wayvnc 0.9.0 and weston 14's headless backend. The VNC backend provides
-        both the Wayland compositor and VNC server in a single process.
+        Must use the headless backend because wf-recorder requires the
+        wlr-screencopy-unstable-v1 protocol which only headless supports.
+        VNC preview is handled separately by wayvnc (best-effort).
 
         Returns True if weston started and the Wayland socket appeared.
         """
@@ -235,12 +234,10 @@ class WaylandManager:
         env = self._base_env(managed)
         weston_cmd = [
             config.WESTON_PATH,
-            f"--backend=vnc",
+            f"--backend=headless",
             f"--width={width}",
             f"--height={height}",
-            f"--port={managed.vnc_port}",
             f"--socket={managed.wayland_display}",
-            "--disable-transport-layer-security",
         ]
 
         logger.info("Starting weston: %s (runtime=%s)", " ".join(weston_cmd), managed.runtime_dir)
@@ -369,21 +366,37 @@ user_pref("dom.disable_window_move_resize", false);
         """
         env = self._base_env(managed)
         # Use GTK3 VCL plugin with Wayland backend for LibreOffice on weston.
-        # A dummy DISPLAY must be set because LibreOffice's oosplash launcher and
-        # VCL initialization check for DISPLAY even when using Wayland — "Failed to
-        # open display" occurs if DISPLAY is unset, regardless of SAL_USE_VCLPLUGIN.
+        # Keep a dummy DISPLAY as a fallback — GTK3's initialization may still
+        # check for it even when GDK_BACKEND=wayland is set.
         env["SAL_USE_VCLPLUGIN"] = "gtk3"
         env["GDK_BACKEND"] = "wayland"
         env["DISPLAY"] = ":99"
 
+        # Call soffice.bin directly to bypass the oosplash launcher wrapper.
+        # The default /usr/bin/libreoffice → oosplash chain tries to actually
+        # connect to the X11 DISPLAY (not just check the env var), which fails
+        # in a headless Wayland-only environment. soffice.bin skips that check
+        # and honors SAL_USE_VCLPLUGIN + GDK_BACKEND directly.
+        soffice_bin = config.LIBREOFFICE_PATH.replace("/soffice", "/soffice.bin")
+        if not soffice_bin.endswith(".bin"):
+            # Fallback: if LIBREOFFICE_PATH doesn't end with /soffice (e.g. /usr/bin/libreoffice),
+            # look for soffice.bin alongside it or in the standard TDF install path
+            candidate = Path(config.LIBREOFFICE_PATH).parent / "soffice.bin"
+            if not candidate.exists():
+                # TDF builds install to /opt/libreofficeXX.Y/program/
+                for tdf_dir in sorted(Path("/opt").glob("libreoffice*/program/soffice.bin"), reverse=True):
+                    candidate = tdf_dir
+                    break
+            soffice_bin = str(candidate) if candidate.exists() else config.LIBREOFFICE_PATH
+
         lo_cmd = [
-            config.LIBREOFFICE_PATH,
+            soffice_bin,
             "--norestore",
             "--nofirststartwizard",
             "--show", file_path,
         ]
 
-        logger.info("Starting LibreOffice Impress: %s", file_path)
+        logger.info("Starting LibreOffice Impress: %s (binary: %s)", file_path, soffice_bin)
         managed.app_proc = await asyncio.create_subprocess_exec(
             *lo_cmd,
             stdout=asyncio.subprocess.DEVNULL,
@@ -625,16 +638,43 @@ user_pref("dom.disable_window_move_resize", false);
         return True
 
     async def _start_vnc(self, managed: ManagedSource) -> bool:
-        """Start websockify for noVNC preview access.
+        """Start wayvnc and websockify for VNC preview access.
 
-        VNC is now provided by weston's built-in VNC backend (started in
-        _start_weston), so wayvnc is no longer needed. We only need websockify
-        to bridge WebSocket connections from the noVNC HTML5 client to weston's
-        raw VNC server.
+        wayvnc connects to the weston compositor and serves a VNC endpoint.
+        websockify bridges WebSocket connections from noVNC to wayvnc.
+
+        Returns False if either fails — caller decides if this is fatal.
         """
         env = self._base_env(managed)
 
-        # Start websockify — bridges WebSocket (noVNC) to weston's VNC server
+        # Start wayvnc — --disable-input required because weston headless
+        # doesn't support zwp_virtual_pointer_manager_v1
+        wayvnc_cmd = [
+            config.WAYVNC_PATH,
+            "--disable-input",
+            "0.0.0.0", str(managed.vnc_port),
+        ]
+
+        logger.info("Starting wayvnc on port %d", managed.vnc_port)
+        managed.wayvnc_proc = await asyncio.create_subprocess_exec(
+            *wayvnc_cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+
+        await asyncio.sleep(1)
+        if managed.wayvnc_proc.returncode is not None:
+            try:
+                stderr = await asyncio.wait_for(managed.wayvnc_proc.stderr.read(), timeout=3)
+                logger.error("wayvnc exited prematurely (rc=%d): %s",
+                             managed.wayvnc_proc.returncode, stderr.decode()[:500])
+            except asyncio.TimeoutError:
+                logger.error("wayvnc exited prematurely (rc=%d), stderr read timed out",
+                             managed.wayvnc_proc.returncode)
+            return False
+
+        # Start websockify — bridges WebSocket (noVNC) to wayvnc
         websockify_cmd = [
             config.WEBSOCKIFY_PATH,
             "--web", config.NOVNC_DIR,
@@ -662,8 +702,8 @@ user_pref("dom.disable_window_move_resize", false);
                              managed.websockify_proc.returncode)
             return False
 
-        logger.info("VNC preview ready: weston-vnc on port %d, websockify(pid=%d) on port %d",
-                     managed.vnc_port, managed.websockify_proc.pid, managed.novnc_port)
+        logger.info("VNC preview ready: wayvnc(pid=%d) websockify(pid=%d)",
+                     managed.wayvnc_proc.pid, managed.websockify_proc.pid)
         return True
 
     async def _start_ydotoold(self, managed: ManagedSource) -> bool:
@@ -773,8 +813,12 @@ user_pref("dom.disable_window_move_resize", false);
                     raise ValueError("Firefox failed to start")
 
             # Step 4: Start VNC preview (wayvnc + websockify)
+            # Non-fatal: wayvnc 0.9.0 has a protocol mismatch with weston 14 headless
+            # (wants zxdg_output_manager_v1 v3 but headless only provides v2).
+            # Streaming works fine without VNC preview — users just won't see
+            # the live preview iframe until a compatible wayvnc version is available.
             if not await self._start_vnc(managed):
-                raise ValueError("VNC preview (wayvnc/websockify) failed to start")
+                logger.warning("VNC preview not available — streaming will work without preview")
 
             # Step 5: Start capture pipeline (wf-recorder → ffmpeg → multicast)
             db = self._db_factory()
@@ -811,6 +855,7 @@ user_pref("dom.disable_window_move_resize", false);
             ("app", managed.app_proc),
             ("wf-recorder", managed.wf_recorder_proc),
             ("ffmpeg", managed.ffmpeg_proc),
+            ("wayvnc", managed.wayvnc_proc),
             ("websockify", managed.websockify_proc),
             ("ydotoold", managed.ydotoold_proc),
         ]:
