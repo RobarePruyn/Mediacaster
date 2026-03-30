@@ -256,6 +256,10 @@ class WaylandManager:
             "--",
         ] + app_cmd
 
+        # Snapshot existing X11 sockets before cage starts so we can detect
+        # the new XWayland display created by this cage instance.
+        pre_x_sockets = self._snapshot_x_sockets()
+
         logger.info("Starting cage: %s (runtime=%s)", " ".join(cage_cmd), managed.runtime_dir)
         managed.weston_proc = await asyncio.create_subprocess_exec(
             *cage_cmd,
@@ -271,10 +275,14 @@ class WaylandManager:
             if os.path.exists(socket_path):
                 logger.info("Cage ready: socket=%s pid=%d", socket_path, managed.weston_proc.pid)
                 # Detect XWayland display number for X11 key injection.
-                # XWayland creates /tmp/.X11-unix/X<N> sockets.
-                managed.x_display = self._detect_x_display(managed.weston_proc.pid)
+                # XWayland is reparented to PID 1, so we detect by comparing
+                # X sockets before/after cage start.
+                managed.x_display = self._detect_x_display(pre_x_sockets)
                 if managed.x_display is not None:
                     logger.info("XWayland display detected: :%d", managed.x_display)
+                else:
+                    # Store snapshot for post-startup detection
+                    managed._pre_x_sockets = pre_x_sockets
                 return True
             # Check if cage exited prematurely
             if managed.weston_proc.returncode is not None:
@@ -290,34 +298,33 @@ class WaylandManager:
         logger.error("Timed out waiting for cage socket at %s", socket_path)
         return False
 
-    def _detect_x_display(self, cage_pid: int) -> Optional[int]:
-        """Find the XWayland display number for a cage instance.
-
-        XWayland is spawned by cage as a child process. Its command line
-        contains the display number (e.g., "Xwayland :1"). We find it by
-        scanning /proc for child processes of the cage PID.
-        """
+    @staticmethod
+    def _snapshot_x_sockets() -> set:
+        """Return the set of X11 socket numbers currently in /tmp/.X11-unix/."""
+        x11_dir = "/tmp/.X11-unix"
+        result = set()
         try:
-            import glob as globmod
-            for proc_dir in globmod.glob("/proc/[0-9]*/status"):
-                try:
-                    with open(proc_dir) as f:
-                        status = f.read()
-                    if f"PPid:\t{cage_pid}" not in status:
-                        continue
-                    # This is a child of cage — check if it's Xwayland
-                    pid = proc_dir.split("/")[2]
-                    with open(f"/proc/{pid}/cmdline") as f:
-                        cmdline = f.read()
-                    if "Xwayland" in cmdline or "xwayland" in cmdline:
-                        # Parse display number from cmdline (null-separated)
-                        for arg in cmdline.split("\0"):
-                            if arg.startswith(":"):
-                                return int(arg[1:])
-                except (OSError, ValueError):
-                    continue
-        except Exception as exc:
-            logger.debug("Could not detect X display for cage pid %d: %s", cage_pid, exc)
+            for name in os.listdir(x11_dir):
+                if name.startswith("X") and name[1:].isdigit():
+                    result.add(int(name[1:]))
+        except OSError:
+            pass
+        return result
+
+    def _detect_x_display(self, pre_sockets: set) -> Optional[int]:
+        """Find a new XWayland display by comparing against a pre-start snapshot.
+
+        XWayland is reparented to PID 1 by systemd, so we can't rely on
+        parent PID tracking. Instead, compare the current X sockets in
+        /tmp/.X11-unix/ against the snapshot taken before cage started.
+        """
+        current = self._snapshot_x_sockets()
+        new_sockets = current - pre_sockets
+        if len(new_sockets) == 1:
+            return new_sockets.pop()
+        elif len(new_sockets) > 1:
+            # Multiple new sockets — return the highest (most recently created)
+            return max(new_sockets)
         return None
 
     def _build_firefox_cmd(self, managed: ManagedSource, url: str,
@@ -869,7 +876,8 @@ user_pref("dom.disable_window_move_resize", false);
             # XWayland starts on-demand when an X11 client connects, which may
             # happen after the Wayland socket appears.
             if managed.x_display is None and managed.weston_proc.returncode is None:
-                managed.x_display = self._detect_x_display(managed.weston_proc.pid)
+                pre_sockets = getattr(managed, '_pre_x_sockets', set())
+                managed.x_display = self._detect_x_display(pre_sockets)
                 if managed.x_display is not None:
                     logger.info("XWayland display detected (post-startup): :%d", managed.x_display)
 
