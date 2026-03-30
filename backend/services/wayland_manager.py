@@ -386,12 +386,26 @@ user_pref("dom.disable_window_move_resize", false);
                     break
             soffice_bin = str(candidate) if candidate.exists() else config.LIBREOFFICE_PATH
 
-        cmd = [
-            soffice_bin,
-            "--norestore",
-            "--nofirststartwizard",
-            "--show", file_path,
-        ]
+        # Wrap soffice.bin in a shell script that waits for XWayland to be ready.
+        # cage starts XWayland asynchronously — if soffice.bin runs immediately,
+        # it may fail with "no suitable windowing system found" because the X11
+        # display isn't accepting connections yet. The wrapper polls with xdpyinfo
+        # (falls back to a fixed sleep if xdpyinfo isn't available).
+        wrapper_script = os.path.join(managed.runtime_dir, "lo_wrapper.sh")
+        with open(wrapper_script, "w") as f:
+            f.write(f"""#!/bin/sh
+# Wait for XWayland DISPLAY to become available
+for i in $(seq 1 20); do
+    if xdpyinfo >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.25
+done
+exec {soffice_bin} --norestore --nofirststartwizard --show '{file_path}'
+""")
+        os.chmod(wrapper_script, 0o755)
+
+        cmd = ["/bin/sh", wrapper_script]
 
         logger.info("LibreOffice command prepared: %s (binary: %s)", file_path, soffice_bin)
         return cmd, env
