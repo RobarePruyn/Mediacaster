@@ -367,6 +367,10 @@ user_pref("dom.disable_window_move_resize", false);
             # cage's XWayland integration provides a DISPLAY that soffice.bin
             # can connect to via the standard X11 path.
             "SAL_USE_VCLPLUGIN": "gen",
+            # Force software GL rendering — no GPU on headless servers.
+            # Without this, XWayland glamor fails with "GBM Wayland interfaces
+            # not available" because the pixman renderer doesn't support GBM.
+            "LIBGL_ALWAYS_SOFTWARE": "1",
         }
 
         # Call soffice.bin directly to bypass the oosplash launcher wrapper.
