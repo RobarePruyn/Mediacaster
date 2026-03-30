@@ -221,24 +221,26 @@ class WaylandManager:
         return env
 
     async def _start_weston(self, managed: ManagedSource, resolution: str) -> bool:
-        """Launch a headless weston compositor for this stream.
+        """Launch weston with VNC backend for this stream.
 
-        Weston creates a virtual Wayland display that applications render into
-        and wf-recorder captures from. The headless backend has no physical
-        display — output is purely in-memory.
+        Uses weston's built-in VNC backend instead of headless + separate wayvnc.
+        This eliminates the zxdg_output_manager_v1 version mismatch between
+        wayvnc 0.9.0 and weston 14's headless backend. The VNC backend provides
+        both the Wayland compositor and VNC server in a single process.
 
         Returns True if weston started and the Wayland socket appeared.
         """
         width, height = resolution.split("x")
 
         env = self._base_env(managed)
-        # weston needs its own XDG_RUNTIME_DIR set before launch
         weston_cmd = [
             config.WESTON_PATH,
-            f"--backend=headless",
+            f"--backend=vnc",
             f"--width={width}",
             f"--height={height}",
+            f"--port={managed.vnc_port}",
             f"--socket={managed.wayland_display}",
+            "--disable-transport-layer-security",
         ]
 
         logger.info("Starting weston: %s (runtime=%s)", " ".join(weston_cmd), managed.runtime_dir)
@@ -366,10 +368,10 @@ user_pref("dom.disable_window_move_resize", false);
         (Right/Left/Space/Escape) via ydotool.
         """
         env = self._base_env(managed)
-        # Force GTK3 VCL plugin and Wayland GDK backend — without GDK_BACKEND=wayland,
-        # GTK3 tries X11 first and fails with "no suitable windowing system found"
-        env["SAL_USE_VCLPLUGIN"] = "gtk3"
-        env["GDK_BACKEND"] = "wayland"
+        # Use GTK4 VCL plugin — GTK4 is Wayland-native and doesn't fall back to X11.
+        # GTK3 with GDK_BACKEND=wayland still produces "Failed to open display" because
+        # LibreOffice's VCL layer checks for X11 DISPLAY before GTK3 Wayland init.
+        env["SAL_USE_VCLPLUGIN"] = "gtk4"
 
         lo_cmd = [
             config.LIBREOFFICE_PATH,
@@ -610,44 +612,16 @@ user_pref("dom.disable_window_move_resize", false);
         return True
 
     async def _start_vnc(self, managed: ManagedSource) -> bool:
-        """Start wayvnc and websockify for VNC preview access.
+        """Start websockify for noVNC preview access.
 
-        wayvnc connects to the weston compositor via the Wayland protocol
-        and serves a VNC endpoint. websockify bridges WebSocket connections
-        from the noVNC HTML5 client to wayvnc's raw VNC protocol.
+        VNC is now provided by weston's built-in VNC backend (started in
+        _start_weston), so wayvnc is no longer needed. We only need websockify
+        to bridge WebSocket connections from the noVNC HTML5 client to weston's
+        raw VNC server.
         """
         env = self._base_env(managed)
 
-        # Start wayvnc — binds to all interfaces on the allocated VNC port.
-        # --disable-input is required because weston's headless backend doesn't
-        # support the zwp_virtual_pointer_manager_v1 protocol that wayvnc uses
-        # for mouse/keyboard input. Input injection is handled by ydotool instead.
-        wayvnc_cmd = [
-            config.WAYVNC_PATH,
-            "--disable-input",
-            "0.0.0.0", str(managed.vnc_port),
-        ]
-
-        logger.info("Starting wayvnc on port %d", managed.vnc_port)
-        managed.wayvnc_proc = await asyncio.create_subprocess_exec(
-            *wayvnc_cmd,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
-        )
-
-        await asyncio.sleep(1)
-        if managed.wayvnc_proc.returncode is not None:
-            try:
-                stderr = await asyncio.wait_for(managed.wayvnc_proc.stderr.read(), timeout=3)
-                logger.error("wayvnc exited prematurely (rc=%d): %s",
-                             managed.wayvnc_proc.returncode, stderr.decode()[:500])
-            except asyncio.TimeoutError:
-                logger.error("wayvnc exited prematurely (rc=%d), stderr read timed out",
-                             managed.wayvnc_proc.returncode)
-            return False
-
-        # Start websockify — bridges WebSocket (noVNC) to raw VNC (wayvnc)
+        # Start websockify — bridges WebSocket (noVNC) to weston's VNC server
         websockify_cmd = [
             config.WEBSOCKIFY_PATH,
             "--web", config.NOVNC_DIR,
@@ -824,7 +798,6 @@ user_pref("dom.disable_window_move_resize", false);
             ("app", managed.app_proc),
             ("wf-recorder", managed.wf_recorder_proc),
             ("ffmpeg", managed.ffmpeg_proc),
-            ("wayvnc", managed.wayvnc_proc),
             ("websockify", managed.websockify_proc),
             ("ydotoold", managed.ydotoold_proc),
         ]:
