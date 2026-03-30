@@ -243,8 +243,10 @@ class WaylandManager:
         env = self._base_env(managed)
         # Tell wlroots to use the headless backend (no physical display needed)
         env["WLR_BACKENDS"] = "headless"
-        # Create exactly one virtual output
+        # Create exactly one virtual output at the stream's configured resolution
         env["WLR_HEADLESS_OUTPUTS"] = "1"
+        width, height = resolution.split("x")
+        env["WLR_HEADLESS_RESOLUTION"] = f"{width}x{height}"
         # Force pixman (software) renderer — no GPU/DRM render node on headless servers
         env["WLR_RENDERER"] = "pixman"
         # Merge any application-specific env vars (e.g., MOZ_ENABLE_WAYLAND for Firefox)
@@ -570,6 +572,7 @@ user_pref("dom.disable_window_move_resize", false);
         # --- Start wf-recorder: screencopy → raw video pipe to stdout ---
         wf_cmd = [
             config.WF_RECORDER_PATH,
+            "-y",  # Force overwrite — /dev/stdout triggers "file exists" prompt
             "--muxer", "rawvideo",
             "--codec", "rawvideo",
             "--pixel-format", "bgr0",
