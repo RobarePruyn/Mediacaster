@@ -494,13 +494,21 @@ user_pref("dom.disable_window_move_resize", false);
             "--file", "/dev/stdout",
         ]
 
+        # Create a raw OS pipe for wf-recorder stdout → ffmpeg stdin.
+        # We cannot use asyncio.subprocess.PIPE for wf-recorder stdout and then
+        # pass it as ffmpeg stdin — uvloop wraps it as a StreamReader which lacks
+        # fileno(). An OS-level pipe gives both processes raw file descriptors.
+        video_pipe_r, video_pipe_w = os.pipe()
+
         logger.info("Starting wf-recorder: %s", " ".join(wf_cmd))
         managed.wf_recorder_proc = await asyncio.create_subprocess_exec(
             *wf_cmd,
-            stdout=asyncio.subprocess.PIPE,
+            stdout=video_pipe_w,
             stderr=asyncio.subprocess.PIPE,
             env=env,
         )
+        # Close the write end in our process — wf-recorder owns it now
+        os.close(video_pipe_w)
 
         # --- Build ffmpeg command: raw video from pipe → encode → multicast ---
         ffmpeg_cmd = [
@@ -582,11 +590,13 @@ user_pref("dom.disable_window_move_resize", false);
         logger.info("Starting ffmpeg encoder → %s", multicast_url)
         managed.ffmpeg_proc = await asyncio.create_subprocess_exec(
             *ffmpeg_cmd,
-            stdin=managed.wf_recorder_proc.stdout,
+            stdin=video_pipe_r,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
             env=env,
         )
+        # Close the read end in our process — ffmpeg owns it now
+        os.close(video_pipe_r)
 
         # Brief wait to confirm both processes are running
         await asyncio.sleep(1)
