@@ -29,6 +29,7 @@ Three source types:
 """
 
 import logging
+import os
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 from backend.database import get_db
@@ -566,6 +567,10 @@ async def start_stream(stream_id: int, request: Request, db: Session = Depends(g
         ).first()
         if not presentation or not presentation.file_path:
             raise HTTPException(status_code=400, detail="Presentation file not available")
+        if not os.path.isfile(presentation.file_path):
+            raise HTTPException(status_code=400,
+                                detail=f"Presentation file missing from disk. "
+                                       f"Please re-upload the presentation.")
         if presentation.status != PresentationStatus.READY:
             raise HTTPException(status_code=400,
                                 detail=f"Presentation is not ready (status: {presentation.status.value})")
@@ -650,6 +655,8 @@ async def restart_stream(stream_id: int, request: Request, db: Session = Depends
                 ).first()
                 if not presentation or not presentation.file_path:
                     raise ValueError("Presentation file not available")
+                if not os.path.isfile(presentation.file_path):
+                    raise ValueError("Presentation file missing from disk. Please re-upload.")
                 await bm.start_presentation(
                     stream_id, presentation.file_path,
                     stream.browser_source.capture_audio,
