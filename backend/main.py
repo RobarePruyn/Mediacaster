@@ -80,13 +80,17 @@ async def lifespan(app: FastAPI):
              so route handlers can access them via request.app.state.
     """
     # --- Startup ---
-    # Reconfigure logging after uvicorn's dictConfig runs. uvicorn's default
-    # logging setup uses disable_existing_loggers=True, which silently disables
-    # all application loggers created at import time (wayland_manager, stream_manager,
-    # etc.). force=True replaces root handlers with ours.
+    # Fix logging after uvicorn's dictConfig runs. uvicorn's default logging
+    # setup calls dictConfig with disable_existing_loggers=True, which sets
+    # logger.disabled=True on ALL loggers created at import time (main,
+    # wayland_manager, stream_manager, etc.). basicConfig(force=True) replaces
+    # root handlers but does NOT clear the disabled flag. We must do both.
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
                         force=True)
+    for existing_logger in [logging.getLogger(name)
+                            for name in logging.Logger.manager.loggerDict]:
+        existing_logger.disabled = False
 
     logger.info("Running database migrations...")
     _run_alembic_migrations()
