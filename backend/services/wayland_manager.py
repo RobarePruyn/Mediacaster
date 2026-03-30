@@ -462,15 +462,28 @@ user_pref("dom.disable_window_move_resize", false);
 </oor:items>
 """)
 
-        cmd = [
-            soffice_cmd,
-            "--norestore",
-            "--nofirststartwizard",
-            f"-env:UserInstallation=file://{lo_profile}",
-            "--show", file_path,
-        ]
+        # Wrap LO in a restart loop so the slideshow never kills the pipeline.
+        # When the user presses Next past the last slide, LO exits --show mode
+        # and terminates. Without this wrapper, cage would lose its child process
+        # and exit too, tearing down the entire capture pipeline (502 error).
+        # The loop restarts LO from slide 1 after a brief pause.
+        # Lock file cleanup is inside the loop so it runs before each restart.
+        wrapper_script = os.path.join(managed.runtime_dir, "lo_loop.sh")
+        with open(wrapper_script, "w") as f:
+            f.write("#!/bin/sh\n")
+            f.write("while true; do\n")
+            f.write(f'  rm -f "{lock_file}"\n')
+            f.write(f'  "{soffice_cmd}" --norestore --nofirststartwizard '
+                    f'"-env:UserInstallation=file://{lo_profile}" '
+                    f'--show "{file_path}"\n')
+            f.write("  sleep 1\n")
+            f.write("done\n")
+        os.chmod(wrapper_script, 0o755)
 
-        logger.info("LibreOffice command prepared: %s (binary: %s)", file_path, soffice_cmd)
+        cmd = ["/bin/sh", wrapper_script]
+
+        logger.info("LibreOffice command prepared: %s (binary: %s, looping wrapper: %s)",
+                     file_path, soffice_cmd, wrapper_script)
         return cmd, env
 
     async def _start_audio(self, managed: ManagedSource) -> Optional[str]:
@@ -1085,7 +1098,18 @@ user_pref("dom.disable_window_move_resize", false);
             xlib = ctypes.cdll.LoadLibrary("libX11.so.6")
             xtst = ctypes.cdll.LoadLibrary("libXtst.so.6")
 
+            # Declare proper function signatures — critical on x86_64 where
+            # pointers are 64-bit but ctypes defaults to 32-bit int args.
+            xlib.XOpenDisplay.argtypes = [ctypes.c_char_p]
             xlib.XOpenDisplay.restype = ctypes.c_void_p
+            xlib.XKeysymToKeycode.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+            xlib.XKeysymToKeycode.restype = ctypes.c_int
+            xlib.XFlush.argtypes = [ctypes.c_void_p]
+            xlib.XCloseDisplay.argtypes = [ctypes.c_void_p]
+            xtst.XTestFakeKeyEvent.argtypes = [
+                ctypes.c_void_p, ctypes.c_uint, ctypes.c_int, ctypes.c_ulong
+            ]
+
             display = xlib.XOpenDisplay(display_str.encode())
             if not display:
                 logger.warning("Could not open X display %s for stream %d",
@@ -1103,8 +1127,8 @@ user_pref("dom.disable_window_move_resize", false);
                            key, keysym, keycode, display_str, stream_id)
 
                 # XTEST: press then release
-                xtst.XTestFakeKeyEvent(display, keycode, True, 0)
-                xtst.XTestFakeKeyEvent(display, keycode, False, 0)
+                xtst.XTestFakeKeyEvent(display, keycode, 1, 0)
+                xtst.XTestFakeKeyEvent(display, keycode, 0, 0)
                 xlib.XFlush(display)
             finally:
                 xlib.XCloseDisplay(display)
