@@ -654,11 +654,10 @@ user_pref("dom.disable_window_move_resize", false);
         """
         env = self._base_env(managed)
 
-        # Start wayvnc — --disable-input avoids virtual pointer protocol issues
-        # doesn't support zwp_virtual_pointer_manager_v1
+        # Start wayvnc — cage (wlroots) supports the virtual pointer and keyboard
+        # protocols, so input forwarding from VNC clients works correctly.
         wayvnc_cmd = [
             config.WAYVNC_PATH,
-            "--disable-input",
             "0.0.0.0", str(managed.vnc_port),
         ]
 
@@ -859,11 +858,9 @@ user_pref("dom.disable_window_move_resize", false);
             finally:
                 db.close()
 
-            # Step 6: Start ydotoold for presentation sources (keyboard input)
-            if source_mode == "presentation":
-                if not await self._start_ydotoold(managed):
-                    logger.warning("ydotoold failed — slide control will not work")
-                    # Non-fatal: streaming still works, just no keyboard input
+            # Note: slide control uses wtype (Wayland-native key sender) invoked
+            # on-demand by send_key(). No daemon startup needed — unlike ydotool,
+            # wtype connects directly to the compositor via WAYLAND_DISPLAY.
 
         except (ValueError, OSError) as exc:
             # Any startup failure: kill all processes and release resources
@@ -884,7 +881,6 @@ user_pref("dom.disable_window_move_resize", false);
             ("ffmpeg", managed.ffmpeg_proc),
             ("wayvnc", managed.wayvnc_proc),
             ("websockify", managed.websockify_proc),
-            ("ydotoold", managed.ydotoold_proc),
         ]:
             if proc and proc.stderr:
                 asyncio.create_task(_drain_stderr(proc, label))
@@ -971,11 +967,12 @@ user_pref("dom.disable_window_move_resize", false);
         )
 
     async def send_key(self, stream_id: int, key: str) -> bool:
-        """Send a keyboard event to a running source via ydotool.
+        """Send a keyboard event to a running source via wtype.
 
         Used to control LibreOffice Impress slideshow navigation from the API.
-        Maps X11 keysym names (used by the existing API) to Linux evdev key
-        codes that ydotool understands.
+        wtype is a Wayland-native tool that sends key events directly to the
+        compositor via the zwp_virtual_keyboard protocol — unlike ydotool which
+        uses /dev/uinput (kernel-level) and doesn't work with wlroots headless.
 
         Args:
             stream_id: Database ID of the stream
@@ -989,50 +986,46 @@ user_pref("dom.disable_window_move_resize", false);
             logger.warning("send_key called for inactive stream %d", stream_id)
             return False
 
-        # Map X11 keysym names to Linux evdev key codes for ydotool.
-        # ydotool key syntax: "<code>:1" = press, "<code>:0" = release
-        # Key codes from linux/input-event-codes.h
+        # Map API key names to xkb keysym names used by wtype.
+        # wtype uses xkbcommon keysym names (lowercase, no prefix).
         key_map = {
-            "Right": "106",      # KEY_RIGHT
-            "Left": "105",       # KEY_LEFT
-            "Home": "102",       # KEY_HOME
-            "End": "107",        # KEY_END
-            "Escape": "1",       # KEY_ESC
-            "space": "57",       # KEY_SPACE
-            "Return": "28",      # KEY_ENTER
-            "Page_Up": "104",    # KEY_PAGEUP
-            "Page_Down": "109",  # KEY_PAGEDOWN
-            "Up": "103",         # KEY_UP
-            "Down": "108",       # KEY_DOWN
+            "Right": "Right",
+            "Left": "Left",
+            "Home": "Home",
+            "End": "End",
+            "Escape": "Escape",
+            "space": "space",
+            "Return": "Return",
+            "Page_Up": "Prior",      # xkb name for Page Up
+            "Page_Down": "Next",     # xkb name for Page Down
+            "Up": "Up",
+            "Down": "Down",
         }
 
-        evdev_code = key_map.get(key)
-        if not evdev_code:
+        xkb_key = key_map.get(key)
+        if not xkb_key:
             logger.warning("Rejected unmapped key '%s' for stream %d", key, stream_id)
             return False
 
         env = self._base_env(managed)
-        socket_path = os.path.join(managed.runtime_dir, "ydotool.sock")
-        env["YDOTOOL_SOCKET"] = socket_path
 
         try:
             proc = await asyncio.create_subprocess_exec(
-                config.YDOTOOL_PATH, "key",
-                f"{evdev_code}:1", f"{evdev_code}:0",
+                config.WTYPE_PATH, "-k", xkb_key,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
             )
             _, stderr = await proc.communicate()
             if proc.returncode != 0:
-                logger.warning("ydotool key send failed for stream %d: %s",
+                logger.warning("wtype key send failed for stream %d: %s",
                                stream_id, stderr.decode()[:200])
                 return False
         except (OSError, FileNotFoundError) as exc:
-            logger.warning("ydotool not available for stream %d: %s", stream_id, exc)
+            logger.warning("wtype not available for stream %d: %s", stream_id, exc)
             return False
 
-        logger.debug("Sent key '%s' (evdev %s) to stream %d", key, evdev_code, stream_id)
+        logger.debug("Sent key '%s' (xkb %s) to stream %d", key, xkb_key, stream_id)
         return True
 
     async def stop_browser(self, stream_id: int):

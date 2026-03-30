@@ -142,6 +142,7 @@ WF_RECORDER_PATH = os.getenv("MCS_WF_RECORDER_PATH", "/usr/local/bin/wf-recorder
 WAYVNC_PATH = os.getenv("MCS_WAYVNC_PATH", "/usr/bin/wayvnc")
 YDOTOOL_PATH = os.getenv("MCS_YDOTOOL_PATH", "/usr/local/bin/ydotool")
 YDOTOOLD_PATH = os.getenv("MCS_YDOTOOLD_PATH", "/usr/local/bin/ydotoold")
+WTYPE_PATH = os.getenv("MCS_WTYPE_PATH", "/usr/local/bin/wtype")
 FIREFOX_PATH = os.getenv("MCS_FIREFOX_PATH", "/usr/bin/firefox")
 WEBSOCKIFY_PATH = os.getenv("MCS_WEBSOCKIFY_PATH", "/usr/bin/websockify")
 # noVNC static files served by websockify for the browser-based VNC client
