@@ -380,6 +380,22 @@ user_pref("dom.disable_window_move_resize", false);
         # via XWAYLAND_NO_GLAMOR, the oosplash launcher can connect to it.
         soffice_cmd = config.LIBREOFFICE_PATH
 
+        # Remove stale lock files from crashed previous instances.
+        # LibreOffice creates .~lock.<filename># in the same directory as the
+        # document. If a previous cage/LO process was killed, the lock file
+        # persists and LO shows a "locked for editing" dialog instead of the
+        # slideshow — unusable in a headless kiosk environment.
+        lock_file = os.path.join(
+            os.path.dirname(file_path),
+            ".~lock." + os.path.basename(file_path) + "#"
+        )
+        if os.path.exists(lock_file):
+            logger.info("Removing stale LibreOffice lock file: %s", lock_file)
+            try:
+                os.remove(lock_file)
+            except OSError as e:
+                logger.warning("Could not remove lock file %s: %s", lock_file, e)
+
         # Create a LibreOffice user profile that skips the first-run wizard.
         # The --nofirststartwizard flag doesn't suppress it in newer TDF builds;
         # the wizard checks for a registrymodifications.xcu file in the user profile.
