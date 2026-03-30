@@ -1099,6 +1099,9 @@ user_pref("dom.disable_window_move_resize", false);
                                    keysym, display_str)
                     return False
 
+                logger.info("X11 XTEST: key='%s' keysym=0x%x keycode=%d display=%s stream=%d",
+                           key, keysym, keycode, display_str, stream_id)
+
                 # XTEST: press then release
                 xtst.XTestFakeKeyEvent(display, keycode, True, 0)
                 xtst.XTestFakeKeyEvent(display, keycode, False, 0)
