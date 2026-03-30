@@ -459,6 +459,11 @@ user_pref("dom.disable_window_move_resize", false);
     <value>26.2</value>
   </prop>
 </item>
+<item oor:path="/org.openoffice.Office.Common/Misc">
+  <prop oor:name="ShowTipOfTheDay" oor:op="fuse">
+    <value>false</value>
+  </prop>
+</item>
 </oor:items>
 """)
 
@@ -1106,6 +1111,24 @@ user_pref("dom.disable_window_move_resize", false);
             xlib.XKeysymToKeycode.restype = ctypes.c_int
             xlib.XFlush.argtypes = [ctypes.c_void_p]
             xlib.XCloseDisplay.argtypes = [ctypes.c_void_p]
+            xlib.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
+            xlib.XDefaultRootWindow.restype = ctypes.c_ulong
+            xlib.XQueryTree.argtypes = [
+                ctypes.c_void_p, ctypes.c_ulong,
+                ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_ulong),
+                ctypes.POINTER(ctypes.POINTER(ctypes.c_ulong)),
+                ctypes.POINTER(ctypes.c_uint),
+            ]
+            xlib.XQueryTree.restype = ctypes.c_int
+            xlib.XFetchName.argtypes = [
+                ctypes.c_void_p, ctypes.c_ulong,
+                ctypes.POINTER(ctypes.c_char_p),
+            ]
+            xlib.XFetchName.restype = ctypes.c_int
+            xlib.XFree.argtypes = [ctypes.c_void_p]
+            xlib.XSetInputFocus.argtypes = [
+                ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong,
+            ]
             xtst.XTestFakeKeyEvent.argtypes = [
                 ctypes.c_void_p, ctypes.c_uint, ctypes.c_int, ctypes.c_ulong
             ]
@@ -1117,14 +1140,47 @@ user_pref("dom.disable_window_move_resize", false);
                 return False
 
             try:
+                # Find the "Presenting:" window and set focus to it.
+                # Without explicit focus, XTEST events go to window 0 (nowhere).
+                root = xlib.XDefaultRootWindow(display)
+                root_ret = ctypes.c_ulong()
+                parent = ctypes.c_ulong()
+                children = ctypes.POINTER(ctypes.c_ulong)()
+                nchildren = ctypes.c_uint()
+                xlib.XQueryTree(display, root, ctypes.byref(root_ret),
+                                ctypes.byref(parent), ctypes.byref(children),
+                                ctypes.byref(nchildren))
+
+                presenting_win = None
+                for i in range(nchildren.value):
+                    wid = children[i]
+                    name = ctypes.c_char_p()
+                    xlib.XFetchName(display, wid, ctypes.byref(name))
+                    if name.value:
+                        wname = name.value.decode(errors="replace")
+                        xlib.XFree(name)
+                        if wname.startswith("Presenting:"):
+                            presenting_win = wid
+                            break
+
+                if nchildren.value > 0:
+                    xlib.XFree(children)
+
+                if presenting_win:
+                    # RevertToParent = 2, CurrentTime = 0
+                    xlib.XSetInputFocus(display, presenting_win, 2, 0)
+                    xlib.XFlush(display)
+
                 keycode = xlib.XKeysymToKeycode(display, keysym)
                 if keycode == 0:
                     logger.warning("No keycode for keysym 0x%x on display %s",
                                    keysym, display_str)
                     return False
 
-                logger.info("X11 XTEST: key='%s' keysym=0x%x keycode=%d display=%s stream=%d",
-                           key, keysym, keycode, display_str, stream_id)
+                logger.info("X11 XTEST: key='%s' keysym=0x%x keycode=%d display=%s "
+                           "stream=%d focus_win=%s",
+                           key, keysym, keycode, display_str, stream_id,
+                           presenting_win or "none")
 
                 # XTEST: press then release
                 xtst.XTestFakeKeyEvent(display, keycode, 1, 0)
