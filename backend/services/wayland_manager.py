@@ -367,6 +367,11 @@ user_pref("dom.disable_window_move_resize", false);
             # cage's XWayland integration provides a DISPLAY that soffice.bin
             # can connect to via the standard X11 path.
             "SAL_USE_VCLPLUGIN": "gen",
+            # Disable glamor (GPU-accelerated rendering) in XWayland.
+            # With pixman software renderer, XWayland's glamor can't get GBM
+            # interfaces from the compositor, causing a fatal error (rc=81).
+            # This forces XWayland to use software acceleration instead.
+            "XWAYLAND_NO_GLAMOR": "1",
         }
 
         # Call soffice.bin directly to bypass the oosplash launcher wrapper.
