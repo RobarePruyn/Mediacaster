@@ -105,6 +105,9 @@ class ManagedSource:
         self.websockify_proc: Optional[asyncio.subprocess.Process] = None
         self.ydotoold_proc: Optional[asyncio.subprocess.Process] = None
 
+        # X11 display number assigned by XWayland (for presentation sources)
+        self.x_display: Optional[int] = None
+
         # Set to True when stop is called to prevent watcher from flagging error
         self.should_stop = False
 
@@ -267,6 +270,11 @@ class WaylandManager:
             await asyncio.sleep(0.25)
             if os.path.exists(socket_path):
                 logger.info("Cage ready: socket=%s pid=%d", socket_path, managed.weston_proc.pid)
+                # Detect XWayland display number for X11 key injection.
+                # XWayland creates /tmp/.X11-unix/X<N> sockets.
+                managed.x_display = self._detect_x_display(managed.weston_proc.pid)
+                if managed.x_display is not None:
+                    logger.info("XWayland display detected: :%d", managed.x_display)
                 return True
             # Check if cage exited prematurely
             if managed.weston_proc.returncode is not None:
@@ -281,6 +289,36 @@ class WaylandManager:
 
         logger.error("Timed out waiting for cage socket at %s", socket_path)
         return False
+
+    def _detect_x_display(self, cage_pid: int) -> Optional[int]:
+        """Find the XWayland display number for a cage instance.
+
+        XWayland is spawned by cage as a child process. Its command line
+        contains the display number (e.g., "Xwayland :1"). We find it by
+        scanning /proc for child processes of the cage PID.
+        """
+        try:
+            import glob as globmod
+            for proc_dir in globmod.glob("/proc/[0-9]*/status"):
+                try:
+                    with open(proc_dir) as f:
+                        status = f.read()
+                    if f"PPid:\t{cage_pid}" not in status:
+                        continue
+                    # This is a child of cage — check if it's Xwayland
+                    pid = proc_dir.split("/")[2]
+                    with open(f"/proc/{pid}/cmdline") as f:
+                        cmdline = f.read()
+                    if "Xwayland" in cmdline or "xwayland" in cmdline:
+                        # Parse display number from cmdline (null-separated)
+                        for arg in cmdline.split("\0"):
+                            if arg.startswith(":"):
+                                return int(arg[1:])
+                except (OSError, ValueError):
+                    continue
+        except Exception as exc:
+            logger.debug("Could not detect X display for cage pid %d: %s", cage_pid, exc)
+        return None
 
     def _build_firefox_cmd(self, managed: ManagedSource, url: str,
                            resolution: str) -> tuple:
@@ -827,6 +865,14 @@ user_pref("dom.disable_window_move_resize", false);
             logger.info("Waiting %ds for application startup...", startup_wait)
             await asyncio.sleep(startup_wait)
 
+            # Re-detect XWayland display if not found during cage startup.
+            # XWayland starts on-demand when an X11 client connects, which may
+            # happen after the Wayland socket appears.
+            if managed.x_display is None and managed.weston_proc.returncode is None:
+                managed.x_display = self._detect_x_display(managed.weston_proc.pid)
+                if managed.x_display is not None:
+                    logger.info("XWayland display detected (post-startup): :%d", managed.x_display)
+
             # Check if cage (and its app) are still running after startup wait
             if managed.weston_proc.returncode is not None:
                 try:
@@ -967,12 +1013,14 @@ user_pref("dom.disable_window_move_resize", false);
         )
 
     async def send_key(self, stream_id: int, key: str) -> bool:
-        """Send a keyboard event to a running source via wtype.
+        """Send a keyboard event to a running capture source.
 
-        Used to control LibreOffice Impress slideshow navigation from the API.
-        wtype is a Wayland-native tool that sends key events directly to the
-        compositor via the zwp_virtual_keyboard protocol — unlike ydotool which
-        uses /dev/uinput (kernel-level) and doesn't work with wlroots headless.
+        For presentation sources (XWayland clients), sends X11 XTEST events
+        directly via ctypes — this is the only reliable path since wtype's
+        Wayland virtual keyboard events don't bridge to XWayland clients.
+
+        For browser sources (native Wayland), uses wtype which connects
+        directly to the compositor via zwp_virtual_keyboard protocol.
 
         Args:
             stream_id: Database ID of the stream
@@ -986,8 +1034,81 @@ user_pref("dom.disable_window_move_resize", false);
             logger.warning("send_key called for inactive stream %d", stream_id)
             return False
 
-        # Map API key names to xkb keysym names used by wtype.
-        # wtype uses xkbcommon keysym names (lowercase, no prefix).
+        # If we have an X display (presentation source via XWayland), use XTEST
+        if managed.x_display is not None:
+            return await self._send_key_x11(managed, stream_id, key)
+
+        # Otherwise use wtype for native Wayland sources
+        return await self._send_key_wtype(managed, stream_id, key)
+
+    async def _send_key_x11(self, managed: ManagedSource,
+                            stream_id: int, key: str) -> bool:
+        """Send a key event via X11 XTEST extension using ctypes.
+
+        Connects to the XWayland display and uses XTestFakeKeyEvent to inject
+        a key press/release. This works for XWayland clients (LibreOffice)
+        where Wayland virtual keyboard events don't reach.
+        """
+        import ctypes
+
+        # X11 keysym values (from X11/keysymdef.h)
+        keysym_map = {
+            "Right": 0xff53,
+            "Left": 0xff51,
+            "Home": 0xff50,
+            "End": 0xff57,
+            "Escape": 0xff1b,
+            "space": 0x0020,
+            "Return": 0xff0d,
+            "Page_Up": 0xff55,
+            "Page_Down": 0xff56,
+            "Up": 0xff52,
+            "Down": 0xff54,
+        }
+
+        keysym = keysym_map.get(key)
+        if keysym is None:
+            logger.warning("Rejected unmapped key '%s' for stream %d", key, stream_id)
+            return False
+
+        display_str = f":{managed.x_display}"
+
+        try:
+            xlib = ctypes.cdll.LoadLibrary("libX11.so.6")
+            xtst = ctypes.cdll.LoadLibrary("libXtst.so.6")
+
+            xlib.XOpenDisplay.restype = ctypes.c_void_p
+            display = xlib.XOpenDisplay(display_str.encode())
+            if not display:
+                logger.warning("Could not open X display %s for stream %d",
+                               display_str, stream_id)
+                return False
+
+            try:
+                keycode = xlib.XKeysymToKeycode(display, keysym)
+                if keycode == 0:
+                    logger.warning("No keycode for keysym 0x%x on display %s",
+                                   keysym, display_str)
+                    return False
+
+                # XTEST: press then release
+                xtst.XTestFakeKeyEvent(display, keycode, True, 0)
+                xtst.XTestFakeKeyEvent(display, keycode, False, 0)
+                xlib.XFlush(display)
+            finally:
+                xlib.XCloseDisplay(display)
+
+        except (OSError, Exception) as exc:
+            logger.warning("X11 key send failed for stream %d: %s", stream_id, exc)
+            return False
+
+        logger.debug("Sent X11 key '%s' (keysym 0x%x) to stream %d via DISPLAY=%s",
+                     key, keysym, stream_id, display_str)
+        return True
+
+    async def _send_key_wtype(self, managed: ManagedSource,
+                              stream_id: int, key: str) -> bool:
+        """Send a key event via wtype (Wayland virtual keyboard protocol)."""
         key_map = {
             "Right": "Right",
             "Left": "Left",
@@ -996,8 +1117,8 @@ user_pref("dom.disable_window_move_resize", false);
             "Escape": "Escape",
             "space": "space",
             "Return": "Return",
-            "Page_Up": "Prior",      # xkb name for Page Up
-            "Page_Down": "Next",     # xkb name for Page Down
+            "Page_Up": "Prior",
+            "Page_Down": "Next",
             "Up": "Up",
             "Down": "Down",
         }
