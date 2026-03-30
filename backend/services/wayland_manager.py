@@ -125,6 +125,22 @@ class ManagedSource:
         ] if p is not None]
 
 
+async def _drain_stderr(proc: asyncio.subprocess.Process, label: str):
+    """Read and discard stderr from a running process to prevent pipe buffer fill.
+
+    When a process has stderr=PIPE but we only need stderr on failure, this
+    background task prevents the pipe buffer from filling up and blocking
+    the process during normal operation.
+    """
+    try:
+        while proc.returncode is None:
+            data = await proc.stderr.read(4096)
+            if not data:
+                break
+    except (asyncio.CancelledError, OSError, ValueError):
+        pass
+
+
 class WaylandManager:
     """Manages native Wayland process groups for capture source streaming.
 
@@ -477,7 +493,7 @@ user_pref("dom.disable_window_move_resize", false);
         managed.wf_recorder_proc = await asyncio.create_subprocess_exec(
             *wf_cmd,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
             env=env,
         )
 
@@ -563,7 +579,7 @@ user_pref("dom.disable_window_move_resize", false);
             *ffmpeg_cmd,
             stdin=managed.wf_recorder_proc.stdout,
             stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
             env=env,
         )
 
@@ -571,10 +587,22 @@ user_pref("dom.disable_window_move_resize", false);
         await asyncio.sleep(1)
 
         if managed.wf_recorder_proc.returncode is not None:
-            logger.error("wf-recorder exited prematurely (rc=%d)", managed.wf_recorder_proc.returncode)
+            try:
+                stderr = await asyncio.wait_for(managed.wf_recorder_proc.stderr.read(), timeout=3)
+                logger.error("wf-recorder exited prematurely (rc=%d): %s",
+                             managed.wf_recorder_proc.returncode, stderr.decode()[:500])
+            except asyncio.TimeoutError:
+                logger.error("wf-recorder exited prematurely (rc=%d), stderr read timed out",
+                             managed.wf_recorder_proc.returncode)
             return False
         if managed.ffmpeg_proc.returncode is not None:
-            logger.error("ffmpeg exited prematurely (rc=%d)", managed.ffmpeg_proc.returncode)
+            try:
+                stderr = await asyncio.wait_for(managed.ffmpeg_proc.stderr.read(), timeout=3)
+                logger.error("ffmpeg exited prematurely (rc=%d): %s",
+                             managed.ffmpeg_proc.returncode, stderr.decode()[:500])
+            except asyncio.TimeoutError:
+                logger.error("ffmpeg exited prematurely (rc=%d), stderr read timed out",
+                             managed.ffmpeg_proc.returncode)
             return False
 
         logger.info("Capture pipeline running: wf-recorder(pid=%d) → ffmpeg(pid=%d)",
@@ -600,13 +628,19 @@ user_pref("dom.disable_window_move_resize", false);
         managed.wayvnc_proc = await asyncio.create_subprocess_exec(
             *wayvnc_cmd,
             stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
             env=env,
         )
 
         await asyncio.sleep(1)
         if managed.wayvnc_proc.returncode is not None:
-            logger.error("wayvnc exited prematurely (rc=%d)", managed.wayvnc_proc.returncode)
+            try:
+                stderr = await asyncio.wait_for(managed.wayvnc_proc.stderr.read(), timeout=3)
+                logger.error("wayvnc exited prematurely (rc=%d): %s",
+                             managed.wayvnc_proc.returncode, stderr.decode()[:500])
+            except asyncio.TimeoutError:
+                logger.error("wayvnc exited prematurely (rc=%d), stderr read timed out",
+                             managed.wayvnc_proc.returncode)
             return False
 
         # Start websockify — bridges WebSocket (noVNC) to raw VNC (wayvnc)
@@ -622,13 +656,19 @@ user_pref("dom.disable_window_move_resize", false);
         managed.websockify_proc = await asyncio.create_subprocess_exec(
             *websockify_cmd,
             stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
             env=env,
         )
 
         await asyncio.sleep(0.5)
         if managed.websockify_proc.returncode is not None:
-            logger.error("websockify exited prematurely (rc=%d)", managed.websockify_proc.returncode)
+            try:
+                stderr = await asyncio.wait_for(managed.websockify_proc.stderr.read(), timeout=3)
+                logger.error("websockify exited prematurely (rc=%d): %s",
+                             managed.websockify_proc.returncode, stderr.decode()[:500])
+            except asyncio.TimeoutError:
+                logger.error("websockify exited prematurely (rc=%d), stderr read timed out",
+                             managed.websockify_proc.returncode)
             return False
 
         logger.info("VNC preview ready: wayvnc(pid=%d) websockify(pid=%d)",
@@ -653,13 +693,19 @@ user_pref("dom.disable_window_move_resize", false);
         managed.ydotoold_proc = await asyncio.create_subprocess_exec(
             *ydotoold_cmd,
             stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
             env=env,
         )
 
         await asyncio.sleep(0.5)
         if managed.ydotoold_proc.returncode is not None:
-            logger.error("ydotoold exited prematurely (rc=%d)", managed.ydotoold_proc.returncode)
+            try:
+                stderr = await asyncio.wait_for(managed.ydotoold_proc.stderr.read(), timeout=3)
+                logger.error("ydotoold exited prematurely (rc=%d): %s",
+                             managed.ydotoold_proc.returncode, stderr.decode()[:500])
+            except asyncio.TimeoutError:
+                logger.error("ydotoold exited prematurely (rc=%d), stderr read timed out",
+                             managed.ydotoold_proc.returncode)
             return False
 
         logger.info("ydotoold ready: pid=%d", managed.ydotoold_proc.pid)
@@ -765,6 +811,21 @@ user_pref("dom.disable_window_move_resize", false);
 
         # Register the source and persist port assignments
         self._active[stream_id] = managed
+
+        # Drain stderr pipes in background to prevent buffer fill blocking processes.
+        # All subprocesses use stderr=PIPE for failure diagnostics, but long-running
+        # processes will block if the pipe buffer fills up.
+        for label, proc in [
+            ("weston", managed.weston_proc),
+            ("app", managed.app_proc),
+            ("wf-recorder", managed.wf_recorder_proc),
+            ("ffmpeg", managed.ffmpeg_proc),
+            ("wayvnc", managed.wayvnc_proc),
+            ("websockify", managed.websockify_proc),
+            ("ydotoold", managed.ydotoold_proc),
+        ]:
+            if proc and proc.stderr:
+                asyncio.create_task(_drain_stderr(proc, label))
 
         db = self._db_factory()
         try:
