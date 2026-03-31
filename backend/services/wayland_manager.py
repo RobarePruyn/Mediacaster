@@ -268,6 +268,7 @@ class WaylandManager:
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
             env=env,
+            start_new_session=True,
         )
 
         # Wait for the Wayland socket to appear (indicates cage is ready)
@@ -572,13 +573,16 @@ user_pref("dom.disable_window_move_resize", false);
         # --- Build wf-recorder command ---
         # wf-recorder captures cage's display via wlr-screencopy-unstable-v1.
         # --no-dmabuf forces SHM buffers since the pixman renderer can't do DMA-BUF.
+        # NUT muxer is used instead of rawvideo because it carries format metadata
+        # (resolution, pixel format) and handles the format conversion properly.
+        # The pixman renderer delivers frames in GBRP/GBR colorspace; NUT lets
+        # ffmpeg auto-detect the format instead of requiring an exact match.
         wf_parts = [
             config.WF_RECORDER_PATH,
             "-y",
             "--no-dmabuf",
-            "--muxer", "rawvideo",
+            "--muxer", "nut",
             "--codec", "rawvideo",
-            "--pixel-format", "bgr0",
             "-f", str(framerate),
             "--file", "/dev/stdout",
         ]
@@ -586,18 +590,15 @@ user_pref("dom.disable_window_move_resize", false);
         # --- Build ffmpeg command: raw video from pipe → encode → multicast ---
         # wf-recorder captures at cage's actual output resolution, which may differ
         # from the stream's configured resolution if WLR_HEADLESS_RESOLUTION is not
-        # honored (wlroots 0.18 defaults to 1280x720). We tell ffmpeg to read at
-        # cage's native size, then scale to the desired output resolution if needed.
+        # honored (wlroots 0.18 defaults to 1280x720). ffmpeg auto-detects the
+        # input format from the NUT container, then scales to the desired output.
         capture_res = "1280x720"  # cage headless default (wlroots 0.18)
         need_scale = (capture_res != resolution)
 
         ffmpeg_parts = [
             config.FFMPEG_PATH, "-y",
             "-thread_queue_size", "512",
-            "-f", "rawvideo",
-            "-pix_fmt", "bgr0",
-            "-video_size", capture_res,
-            "-framerate", str(framerate),
+            "-f", "nut",
             "-i", "pipe:0",
         ]
 
@@ -700,6 +701,9 @@ user_pref("dom.disable_window_move_resize", false);
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
+            # Own session so os.killpg() can terminate the entire process tree
+            # (shell + wf-recorder + ffmpeg) instead of orphaning children
+            start_new_session=True,
             # Deliberately NOT passing env= — let the script set its own env
             # to avoid any asyncio subprocess env inheritance issues
         )
@@ -839,11 +843,20 @@ user_pref("dom.disable_window_move_resize", false);
         """Terminate all processes belonging to a source.
 
         Sends SIGTERM first, waits briefly, then SIGKILL for any survivors.
+        Uses process group kill for shell-script processes (capture.sh) to
+        ensure child processes (wf-recorder, ffmpeg) are also terminated —
+        otherwise they become orphans and compete with the next pipeline start.
         """
         for proc in managed.all_procs:
             try:
                 if proc.returncode is None:
-                    proc.terminate()
+                    # Try killing the entire process group first.
+                    # Processes started with start_new_session=True have their
+                    # own PGID equal to their PID.
+                    try:
+                        os.killpg(proc.pid, signal.SIGTERM)
+                    except (ProcessLookupError, PermissionError):
+                        proc.terminate()
             except ProcessLookupError:
                 pass
 
@@ -853,7 +866,10 @@ user_pref("dom.disable_window_move_resize", false);
         for proc in managed.all_procs:
             try:
                 if proc.returncode is None:
-                    proc.kill()
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError):
+                        proc.kill()
             except ProcessLookupError:
                 pass
 
