@@ -580,15 +580,14 @@ user_pref("dom.disable_window_move_resize", false);
         # --no-dmabuf forces SHM buffers since the pixman renderer can't do DMA-BUF.
         #
         # wf-recorder handles capture, encoding, AND output directly to the
-        # multicast URL. Previous attempts piping rawvideo or MPEG-TS through
-        # a pipe to ffmpeg all failed — wf-recorder receives one screencopy
-        # frame then stops, writing zero bytes to the pipe. By having
-        # wf-recorder write directly to the UDP multicast URL (no pipe),
-        # we bypass whatever output buffering issue causes the stall.
+        # multicast URL. Two patches are required on wf-recorder 0.6.0:
+        # 1. Colorspace fix: add frame->colorspace = AVCOL_SPC_RGB after
+        #    frame->height in add_frame() (see ammen99/wf-recorder#287).
+        # 2. -D (no-damage) flag: without it, copy_with_damage only delivers
+        #    frames when the screen changes, causing hangs on static content.
         #
         # Audio is currently not muxed (video-only MPEG-TS). Future: add
-        # audio via a separate ffmpeg process reading from the multicast
-        # stream, or via PulseAudio capture when wf-recorder supports it.
+        # audio via a separate ffmpeg process or PulseAudio capture.
         capture_res = "1280x720"  # cage headless default (wlroots 0.18)
         need_scale = (capture_res != resolution)
 
@@ -618,6 +617,7 @@ user_pref("dom.disable_window_move_resize", false);
             config.WF_RECORDER_PATH,
             "-y",
             "--no-dmabuf",
+            "-D",  # Disable damage-based capture — deliver frames continuously
             "--muxer", "mpegts",
             "-c", wf_encoder,
             *wf_codec_params,
@@ -625,14 +625,9 @@ user_pref("dom.disable_window_move_resize", false);
             "--file", multicast_url,
         ]
 
-        # NOTE: wf-recorder's --filter flag creates a libavfilter graph that
-        # chokes on the pixman renderer's colorspace mismatch (csp:unknown vs
-        # csp:gbr). Scaling is disabled for now — output is at cage's native
-        # resolution (1280x720). This avoids the filter graph initialization
-        # issue that causes wf-recorder to stall after one frame.
-        # TODO: Re-enable scaling once the colorspace issue is resolved.
-        # if need_scale:
-        #     wf_parts.extend(["--filter", f"scale={width}:{height}"])
+        # Re-enable scaling now that the colorspace patch is applied.
+        if need_scale:
+            wf_parts.extend(["--filter", f"scale={width}:{height}"])
 
         # Write the capture command as a shell script with Wayland env vars.
         import shlex
