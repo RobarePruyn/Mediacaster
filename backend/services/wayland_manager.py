@@ -679,6 +679,9 @@ user_pref("dom.disable_window_move_resize", false);
         wf_str = " ".join(shlex.quote(p) for p in wf_parts)
         ffmpeg_str = " ".join(shlex.quote(p) for p in ffmpeg_parts)
 
+        wf_log = os.path.join(managed.runtime_dir, "wf-recorder.log")
+        ffmpeg_log = os.path.join(managed.runtime_dir, "ffmpeg.log")
+
         pipeline_script = os.path.join(managed.runtime_dir, "capture.sh")
         with open(pipeline_script, "w") as f:
             f.write("#!/bin/sh\n")
@@ -686,7 +689,9 @@ user_pref("dom.disable_window_move_resize", false);
             f.write(f'export XDG_RUNTIME_DIR="{managed.runtime_dir}"\n')
             f.write(f'export WAYLAND_DISPLAY="{managed.wayland_display}"\n')
             f.write(f'export HOME="{os.path.expanduser("~")}"\n')
-            f.write(f'{wf_str} 2>/dev/null | {ffmpeg_str} 2>&1\n')
+            # Log wf-recorder and ffmpeg stderr to separate files for diagnostics
+            f.write(f'{wf_str} 2>{shlex.quote(wf_log)}'
+                    f' | {ffmpeg_str} 2>{shlex.quote(ffmpeg_log)}\n')
         os.chmod(pipeline_script, 0o755)
 
         logger.info("Starting capture pipeline via script: %s", pipeline_script)
@@ -711,6 +716,17 @@ user_pref("dom.disable_window_move_resize", false);
                 logger.error("Capture pipeline exited prematurely (rc=%d), stderr read timed out",
                              managed.ffmpeg_proc.returncode)
             return False
+
+        # Log diagnostics from the capture processes
+        for log_label, log_path in [("wf-recorder", wf_log), ("ffmpeg", ffmpeg_log)]:
+            try:
+                if os.path.exists(log_path):
+                    with open(log_path, "r") as lf:
+                        content = lf.read(2000)
+                    if content.strip():
+                        logger.info("%s log:\n%s", log_label, content.strip()[:500])
+            except OSError:
+                pass
 
         logger.info("Capture pipeline running (shell pid=%d)", managed.ffmpeg_proc.pid)
         return True
