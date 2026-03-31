@@ -569,33 +569,6 @@ user_pref("dom.disable_window_move_resize", false);
 
         env = self._base_env(managed)
 
-        # Warm up cage's screencopy protocol by capturing a single frame.
-        # wf-recorder's first connection after cage starts sometimes fails to
-        # receive frames (suspected wlroots 0.18 screencopy initialization bug).
-        # A brief throwaway capture primes the compositor's screencopy state.
-        warmup_cmd = [
-            config.WF_RECORDER_PATH, "-y", "--no-dmabuf",
-            "--muxer", "rawvideo", "--codec", "rawvideo",
-            "--pixel-format", "bgr0", "-f", "1",
-            "--file", "/dev/null",
-        ]
-        logger.info("Warming up screencopy with brief capture...")
-        warmup = await asyncio.create_subprocess_exec(
-            *warmup_cmd,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-            env=env,
-        )
-        # Let it capture a few frames then kill it
-        await asyncio.sleep(2)
-        try:
-            warmup.kill()
-            await warmup.wait()
-        except ProcessLookupError:
-            pass
-        logger.info("Screencopy warmup complete")
-
         # --- Build wf-recorder command ---
         # wf-recorder captures cage's display via wlr-screencopy-unstable-v1.
         # --no-dmabuf forces SHM buffers since the pixman renderer can't do DMA-BUF.
@@ -697,31 +670,40 @@ user_pref("dom.disable_window_move_resize", false);
             multicast_url,
         ])
 
-        # Run the full pipeline as a single shell pipe command.
-        # Previous approaches (asyncio subprocess pipes, named FIFOs) caused
-        # wf-recorder to deadlock — its libavformat rawvideo muxer never
-        # produced output through Python-managed pipes or FIFOs. A shell pipe
-        # avoids this because the kernel pipe is created by the shell before
-        # either process starts, giving both processes inherited file
-        # descriptors that work naturally with libavformat's stdio path.
+        # Write the pipeline as a shell script. Running via a script file gives
+        # wf-recorder a clean process environment — previous attempts spawning
+        # it directly from asyncio (subprocess pipes, FIFOs, shell commands)
+        # all resulted in wf-recorder's screencopy frame acquisition silently
+        # failing. The exec replaces the shell with wf-recorder directly.
         import shlex
         wf_str = " ".join(shlex.quote(p) for p in wf_parts)
         ffmpeg_str = " ".join(shlex.quote(p) for p in ffmpeg_parts)
-        shell_cmd = f"{wf_str} | {ffmpeg_str}"
 
-        logger.info("Starting capture pipeline: %s", shell_cmd)
-        # The shell process is stored as ffmpeg_proc for process management.
-        # Its PID is the shell's; the actual wf-recorder and ffmpeg are children.
-        managed.ffmpeg_proc = await asyncio.create_subprocess_shell(
-            shell_cmd,
+        wf_log = os.path.join(managed.runtime_dir, "wf-recorder.log")
+        pipeline_script = os.path.join(managed.runtime_dir, "capture.sh")
+        with open(pipeline_script, "w") as f:
+            f.write("#!/bin/sh\n")
+            # Export Wayland env vars so both processes inherit them
+            f.write(f'export XDG_RUNTIME_DIR="{managed.runtime_dir}"\n')
+            f.write(f'export WAYLAND_DISPLAY="{managed.wayland_display}"\n')
+            f.write(f'export HOME="{os.path.expanduser("~")}"\n')
+            # Enable Wayland protocol debug logging for diagnostics
+            f.write('export WAYLAND_DEBUG=1\n')
+            f.write(f'{wf_str} 2>"{wf_log}" | {ffmpeg_str} 2>&1\n')
+        os.chmod(pipeline_script, 0o755)
+
+        logger.info("Starting capture pipeline via script: %s", pipeline_script)
+        managed.ffmpeg_proc = await asyncio.create_subprocess_exec(
+            "/bin/sh", pipeline_script,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
-            env=env,
+            # Deliberately NOT passing env= — let the script set its own env
+            # to avoid any asyncio subprocess env inheritance issues
         )
 
         # Brief wait to confirm the pipeline is running
-        await asyncio.sleep(2)
+        await asyncio.sleep(3)
 
         if managed.ffmpeg_proc.returncode is not None:
             try:
