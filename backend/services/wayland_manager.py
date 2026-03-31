@@ -569,6 +569,33 @@ user_pref("dom.disable_window_move_resize", false);
 
         env = self._base_env(managed)
 
+        # Warm up cage's screencopy protocol by capturing a single frame.
+        # wf-recorder's first connection after cage starts sometimes fails to
+        # receive frames (suspected wlroots 0.18 screencopy initialization bug).
+        # A brief throwaway capture primes the compositor's screencopy state.
+        warmup_cmd = [
+            config.WF_RECORDER_PATH, "-y", "--no-dmabuf",
+            "--muxer", "rawvideo", "--codec", "rawvideo",
+            "--pixel-format", "bgr0", "-f", "1",
+            "--file", "/dev/null",
+        ]
+        logger.info("Warming up screencopy with brief capture...")
+        warmup = await asyncio.create_subprocess_exec(
+            *warmup_cmd,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+            env=env,
+        )
+        # Let it capture a few frames then kill it
+        await asyncio.sleep(2)
+        try:
+            warmup.kill()
+            await warmup.wait()
+        except ProcessLookupError:
+            pass
+        logger.info("Screencopy warmup complete")
+
         # --- Build wf-recorder command ---
         # wf-recorder captures cage's display via wlr-screencopy-unstable-v1.
         # --no-dmabuf forces SHM buffers since the pixman renderer can't do DMA-BUF.
