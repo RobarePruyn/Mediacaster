@@ -679,7 +679,6 @@ user_pref("dom.disable_window_move_resize", false);
         wf_str = " ".join(shlex.quote(p) for p in wf_parts)
         ffmpeg_str = " ".join(shlex.quote(p) for p in ffmpeg_parts)
 
-        wf_log = os.path.join(managed.runtime_dir, "wf-recorder.log")
         pipeline_script = os.path.join(managed.runtime_dir, "capture.sh")
         with open(pipeline_script, "w") as f:
             f.write("#!/bin/sh\n")
@@ -687,9 +686,7 @@ user_pref("dom.disable_window_move_resize", false);
             f.write(f'export XDG_RUNTIME_DIR="{managed.runtime_dir}"\n')
             f.write(f'export WAYLAND_DISPLAY="{managed.wayland_display}"\n')
             f.write(f'export HOME="{os.path.expanduser("~")}"\n')
-            # Enable Wayland protocol debug logging for diagnostics
-            f.write('export WAYLAND_DEBUG=1\n')
-            f.write(f'{wf_str} 2>"{wf_log}" | {ffmpeg_str} 2>&1\n')
+            f.write(f'{wf_str} 2>/dev/null | {ffmpeg_str} 2>&1\n')
         os.chmod(pipeline_script, 0o755)
 
         logger.info("Starting capture pipeline via script: %s", pipeline_script)
