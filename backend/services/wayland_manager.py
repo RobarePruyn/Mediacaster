@@ -625,9 +625,14 @@ user_pref("dom.disable_window_move_resize", false);
             "--file", multicast_url,
         ]
 
-        # If we need to scale, use wf-recorder's built-in filter
-        if need_scale:
-            wf_parts.extend(["--filter", f"scale={width}:{height}"])
+        # NOTE: wf-recorder's --filter flag creates a libavfilter graph that
+        # chokes on the pixman renderer's colorspace mismatch (csp:unknown vs
+        # csp:gbr). Scaling is disabled for now — output is at cage's native
+        # resolution (1280x720). This avoids the filter graph initialization
+        # issue that causes wf-recorder to stall after one frame.
+        # TODO: Re-enable scaling once the colorspace issue is resolved.
+        # if need_scale:
+        #     wf_parts.extend(["--filter", f"scale={width}:{height}"])
 
         # Write the capture command as a shell script with Wayland env vars.
         import shlex
