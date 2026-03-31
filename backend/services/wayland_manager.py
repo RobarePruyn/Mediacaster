@@ -569,33 +569,21 @@ user_pref("dom.disable_window_move_resize", false);
 
         env = self._base_env(managed)
 
-        # --- Start wf-recorder: screencopy → raw video via named pipe (FIFO) ---
-        # wf-recorder's libavformat rawvideo muxer blocks when writing to
-        # /dev/stdout through an OS pipe — it never produces output despite
-        # accepting the -y flag. A named pipe (FIFO) sidesteps this because
-        # libavformat opens it by path as a regular file, avoiding the
-        # /dev/stdout + pipe-fd interaction that causes the deadlock.
-        video_fifo = os.path.join(managed.runtime_dir, "video.pipe")
-        try:
-            os.mkfifo(video_fifo)
-        except FileExistsError:
-            os.remove(video_fifo)
-            os.mkfifo(video_fifo)
-
-        wf_cmd = [
+        # --- Build wf-recorder command ---
+        # wf-recorder captures cage's display via wlr-screencopy-unstable-v1.
+        # --no-dmabuf forces SHM buffers since the pixman renderer can't do DMA-BUF.
+        wf_parts = [
             config.WF_RECORDER_PATH,
             "-y",
-            "--no-dmabuf",  # pixman renderer can't provide DMA-BUF — force SHM
+            "--no-dmabuf",
             "--muxer", "rawvideo",
             "--codec", "rawvideo",
             "--pixel-format", "bgr0",
             "-f", str(framerate),
-            "--file", video_fifo,
+            "--file", "/dev/stdout",
         ]
 
-        logger.info("Starting wf-recorder: %s", " ".join(wf_cmd))
-
-        # --- Build ffmpeg command: raw video from FIFO → encode → multicast ---
+        # --- Build ffmpeg command: raw video from pipe → encode → multicast ---
         # wf-recorder captures at cage's actual output resolution, which may differ
         # from the stream's configured resolution if WLR_HEADLESS_RESOLUTION is not
         # honored (wlroots 0.18 defaults to 1280x720). We tell ffmpeg to read at
@@ -603,15 +591,14 @@ user_pref("dom.disable_window_move_resize", false);
         capture_res = "1280x720"  # cage headless default (wlroots 0.18)
         need_scale = (capture_res != resolution)
 
-        ffmpeg_cmd = [
+        ffmpeg_parts = [
             config.FFMPEG_PATH, "-y",
-            # Raw video input from wf-recorder FIFO
             "-thread_queue_size", "512",
             "-f", "rawvideo",
             "-pix_fmt", "bgr0",
             "-video_size", capture_res,
             "-framerate", str(framerate),
-            "-i", video_fifo,
+            "-i", "pipe:0",
         ]
 
         # Audio input: PulseAudio sink monitor or silent track
@@ -620,24 +607,24 @@ user_pref("dom.disable_window_move_resize", false);
             pulse_sink = await self._start_audio(managed)
 
         if pulse_sink:
-            ffmpeg_cmd.extend([
+            ffmpeg_parts.extend([
                 "-thread_queue_size", "512",
                 "-f", "pulse",
                 "-i", f"{pulse_sink}.monitor",
             ])
         else:
             # Generate silent audio — MPEG-TS receivers expect both audio and video
-            ffmpeg_cmd.extend([
+            ffmpeg_parts.extend([
                 "-f", "lavfi",
                 "-i", "anullsrc=r=48000:cl=stereo",
             ])
 
         # Constant frame rate enforcement
-        ffmpeg_cmd.extend(["-vsync", "cfr", "-r", str(framerate)])
+        ffmpeg_parts.extend(["-vsync", "cfr", "-r", str(framerate)])
 
         # Scale to the stream's configured resolution if capture size differs
         if need_scale:
-            ffmpeg_cmd.extend(["-vf", f"scale={width}:{height}"])
+            ffmpeg_parts.extend(["-vf", f"scale={width}:{height}"])
 
         # Parse bitrate number for VBV calculations
         bitrate_num = int("".join(c for c in bitrate if c.isdigit()))
@@ -646,7 +633,7 @@ user_pref("dom.disable_window_move_resize", false);
         if codec == "h265":
             bufsize_kbps = bitrate_num * 1000 * 2
             maxrate_kbps = bitrate_num * 1000
-            ffmpeg_cmd.extend([
+            ffmpeg_parts.extend([
                 "-c:v", "libx265",
                 "-profile:v", "main",
                 "-preset", "fast",
@@ -658,7 +645,7 @@ user_pref("dom.disable_window_move_resize", false);
             ])
         else:
             bufsize = f"{bitrate_num}M"
-            ffmpeg_cmd.extend([
+            ffmpeg_parts.extend([
                 "-c:v", "libx264",
                 "-profile:v", "main",
                 "-preset", "ultrafast",
@@ -672,7 +659,7 @@ user_pref("dom.disable_window_move_resize", false);
             ])
 
         # Audio encoding + MPEG-TS output
-        ffmpeg_cmd.extend([
+        ffmpeg_parts.extend([
             "-c:a", "aac",
             "-b:a", config.BROWSER_SOURCE_AUDIO_BITRATE,
             "-ac", "2",
@@ -683,50 +670,43 @@ user_pref("dom.disable_window_move_resize", false);
             multicast_url,
         ])
 
-        # Start ffmpeg first — it will block on opening the FIFO for reading
-        # until wf-recorder opens the write end. This is the natural behavior
-        # of named pipes and avoids any race condition.
-        logger.info("Starting ffmpeg encoder → %s", multicast_url)
-        managed.ffmpeg_proc = await asyncio.create_subprocess_exec(
-            *ffmpeg_cmd,
+        # Run the full pipeline as a single shell pipe command.
+        # Previous approaches (asyncio subprocess pipes, named FIFOs) caused
+        # wf-recorder to deadlock — its libavformat rawvideo muxer never
+        # produced output through Python-managed pipes or FIFOs. A shell pipe
+        # avoids this because the kernel pipe is created by the shell before
+        # either process starts, giving both processes inherited file
+        # descriptors that work naturally with libavformat's stdio path.
+        import shlex
+        wf_str = " ".join(shlex.quote(p) for p in wf_parts)
+        ffmpeg_str = " ".join(shlex.quote(p) for p in ffmpeg_parts)
+        shell_cmd = f"{wf_str} | {ffmpeg_str}"
+
+        logger.info("Starting capture pipeline: %s", shell_cmd)
+        # The shell process is stored as ffmpeg_proc for process management.
+        # Its PID is the shell's; the actual wf-recorder and ffmpeg are children.
+        managed.ffmpeg_proc = await asyncio.create_subprocess_shell(
+            shell_cmd,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
             env=env,
         )
 
-        # Start wf-recorder — opening the FIFO write end unblocks ffmpeg's read
-        managed.wf_recorder_proc = await asyncio.create_subprocess_exec(
-            *wf_cmd,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
-        )
-
-        # Brief wait to confirm both processes are running
+        # Brief wait to confirm the pipeline is running
         await asyncio.sleep(2)
 
-        if managed.wf_recorder_proc.returncode is not None:
-            try:
-                stderr = await asyncio.wait_for(managed.wf_recorder_proc.stderr.read(), timeout=3)
-                logger.error("wf-recorder exited prematurely (rc=%d): %s",
-                             managed.wf_recorder_proc.returncode, stderr.decode()[:500])
-            except asyncio.TimeoutError:
-                logger.error("wf-recorder exited prematurely (rc=%d), stderr read timed out",
-                             managed.wf_recorder_proc.returncode)
-            return False
         if managed.ffmpeg_proc.returncode is not None:
             try:
                 stderr = await asyncio.wait_for(managed.ffmpeg_proc.stderr.read(), timeout=3)
-                logger.error("ffmpeg exited prematurely (rc=%d): %s",
+                logger.error("Capture pipeline exited prematurely (rc=%d): %s",
                              managed.ffmpeg_proc.returncode, stderr.decode()[:500])
             except asyncio.TimeoutError:
-                logger.error("ffmpeg exited prematurely (rc=%d), stderr read timed out",
+                logger.error("Capture pipeline exited prematurely (rc=%d), stderr read timed out",
                              managed.ffmpeg_proc.returncode)
             return False
 
-        logger.info("Capture pipeline running: wf-recorder(pid=%d) → ffmpeg(pid=%d)",
-                     managed.wf_recorder_proc.pid, managed.ffmpeg_proc.pid)
+        logger.info("Capture pipeline running (shell pid=%d)", managed.ffmpeg_proc.pid)
         return True
 
     async def _start_vnc(self, managed: ManagedSource) -> bool:
@@ -971,8 +951,7 @@ user_pref("dom.disable_window_move_resize", false);
         # processes will block if the pipe buffer fills up.
         for label, proc in [
             ("cage", managed.weston_proc),
-            ("wf-recorder", managed.wf_recorder_proc),
-            ("ffmpeg", managed.ffmpeg_proc),
+            ("capture-pipeline", managed.ffmpeg_proc),
             ("wayvnc", managed.wayvnc_proc),
             ("websockify", managed.websockify_proc),
         ]:
@@ -1358,8 +1337,7 @@ user_pref("dom.disable_window_move_resize", false);
         # Critical processes — if any of these die, the stream is broken
         critical_procs = [
             ("cage", lambda: managed.weston_proc),
-            ("wf-recorder", lambda: managed.wf_recorder_proc),
-            ("ffmpeg", lambda: managed.ffmpeg_proc),
+            ("capture-pipeline", lambda: managed.ffmpeg_proc),
         ]
 
         try:
