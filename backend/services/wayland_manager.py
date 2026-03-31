@@ -584,7 +584,10 @@ user_pref("dom.disable_window_move_resize", false);
             "--muxer", "nut",
             "--codec", "rawvideo",
             "-f", str(framerate),
-            "--file", "/dev/stdout",
+            # Use pipe:1 instead of /dev/stdout — libavformat's file protocol
+            # handler may attempt seek() on /dev/stdout which fails on pipes.
+            # The pipe protocol knows the output is non-seekable.
+            "--file", "pipe:1",
         ]
 
         # --- Build ffmpeg command: raw video from pipe → encode → multicast ---
