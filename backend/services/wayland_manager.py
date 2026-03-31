@@ -247,12 +247,8 @@ class WaylandManager:
         env["WLR_HEADLESS_OUTPUTS"] = "1"
         width, height = resolution.split("x")
         env["WLR_HEADLESS_RESOLUTION"] = f"{width}x{height}"
-        # Use llvmpipe (software OpenGL) instead of pixman. Pixman delivers
-        # screencopy frames with mismatched colorspace metadata (gbrp/unknown)
-        # that crashes wf-recorder's internal filter graph after one frame.
-        # llvmpipe provides standard RGBA colorspace that wf-recorder handles.
-        env["WLR_RENDERER"] = "gles2"
-        env["LIBGL_ALWAYS_SOFTWARE"] = "1"
+        # Force pixman (software) renderer — no GPU/DRM render node on headless servers
+        env["WLR_RENDERER"] = "pixman"
         # Merge any application-specific env vars (e.g., MOZ_ENABLE_WAYLAND for Firefox)
         if app_env:
             env.update(app_env)
@@ -581,18 +577,18 @@ user_pref("dom.disable_window_move_resize", false);
 
         # --- Build wf-recorder command ---
         # wf-recorder captures cage's display via wlr-screencopy-unstable-v1.
-        # --no-dmabuf forces SHM buffers — llvmpipe may not have a DRM render node
-        # for DMA-BUF export on headless servers without a GPU.
+        # --no-dmabuf forces SHM buffers since the pixman renderer can't do DMA-BUF.
         #
-        # wf-recorder handles both capture AND video encoding. The rawvideo pipe
-        # approach failed because wf-recorder's screencopy loop breaks when it
-        # can't convert from the compositor's native pixel format (gbrp/0bgr from
-        # pixman) to bgr0 — it receives one frame then goes idle. By having
-        # wf-recorder encode to H.264 internally (using its linked libavcodec),
-        # the pixel format conversion happens in a well-tested code path.
+        # wf-recorder handles capture, encoding, AND output directly to the
+        # multicast URL. Previous attempts piping rawvideo or MPEG-TS through
+        # a pipe to ffmpeg all failed — wf-recorder receives one screencopy
+        # frame then stops, writing zero bytes to the pipe. By having
+        # wf-recorder write directly to the UDP multicast URL (no pipe),
+        # we bypass whatever output buffering issue causes the stall.
         #
-        # wf-recorder outputs MPEG-TS to the pipe, then ffmpeg just adds audio
-        # and remuxes (video is passed through with -c:v copy).
+        # Audio is currently not muxed (video-only MPEG-TS). Future: add
+        # audio via a separate ffmpeg process reading from the multicast
+        # stream, or via PulseAudio capture when wf-recorder supports it.
         capture_res = "1280x720"  # cage headless default (wlroots 0.18)
         need_scale = (capture_res != resolution)
 
@@ -605,7 +601,6 @@ user_pref("dom.disable_window_move_resize", false);
             wf_codec_params = [
                 "-p", "preset=fast",
                 "-p", f"b={bitrate_num * 1000000}",
-                # x265 uses x265-params for VBV and keyframe settings
                 "-p", f"x265-params=vbv-bufsize={bitrate_num * 2000}"
                       f":vbv-maxrate={bitrate_num * 1000}"
                       f":min-keyint={gop_size}:keyint={gop_size}",
@@ -627,79 +622,28 @@ user_pref("dom.disable_window_move_resize", false);
             "-c", wf_encoder,
             *wf_codec_params,
             "-f", str(framerate),
-            "--file", "pipe:1",
+            "--file", multicast_url,
         ]
 
         # If we need to scale, use wf-recorder's built-in filter
         if need_scale:
             wf_parts.extend(["--filter", f"scale={width}:{height}"])
 
-        # --- Build ffmpeg command: add audio + remux from pipe ---
-        # wf-recorder delivers encoded H.264 in MPEG-TS via the pipe.
-        # ffmpeg adds a silent audio track (or PulseAudio capture) and outputs
-        # the final MPEG-TS multicast stream. Video is passed through (-c:v copy).
-        ffmpeg_parts = [
-            config.FFMPEG_PATH, "-y",
-            "-thread_queue_size", "512",
-            "-f", "mpegts",
-            "-i", "pipe:0",
-        ]
-
-        # Audio input: PulseAudio sink monitor or silent track
-        pulse_sink = None
-        if capture_audio:
-            pulse_sink = await self._start_audio(managed)
-
-        if pulse_sink:
-            ffmpeg_parts.extend([
-                "-thread_queue_size", "512",
-                "-f", "pulse",
-                "-i", f"{pulse_sink}.monitor",
-            ])
-        else:
-            # Generate silent audio — MPEG-TS receivers expect both audio and video
-            ffmpeg_parts.extend([
-                "-f", "lavfi",
-                "-i", "anullsrc=r=48000:cl=stereo",
-            ])
-
-        # Video passthrough — already encoded by wf-recorder
-        ffmpeg_parts.extend(["-c:v", "copy"])
-
-        # Audio encoding + MPEG-TS output
-        ffmpeg_parts.extend([
-            "-c:a", "aac",
-            "-b:a", config.BROWSER_SOURCE_AUDIO_BITRATE,
-            "-ac", "2",
-            "-ar", "48000",
-            "-f", "mpegts",
-            "-mpegts_transport_stream_id", "1",
-            "-flush_packets", "1",
-            multicast_url,
-        ])
-
-        # Write the pipeline as a shell script. Running via a script file gives
-        # wf-recorder a clean process environment — previous attempts spawning
-        # it directly from asyncio (subprocess pipes, FIFOs, shell commands)
-        # all resulted in wf-recorder's screencopy frame acquisition silently
-        # failing. The exec replaces the shell with wf-recorder directly.
+        # Write the capture command as a shell script with Wayland env vars.
         import shlex
         wf_str = " ".join(shlex.quote(p) for p in wf_parts)
-        ffmpeg_str = " ".join(shlex.quote(p) for p in ffmpeg_parts)
 
         wf_log = os.path.join(managed.runtime_dir, "wf-recorder.log")
-        ffmpeg_log = os.path.join(managed.runtime_dir, "ffmpeg.log")
 
         pipeline_script = os.path.join(managed.runtime_dir, "capture.sh")
         with open(pipeline_script, "w") as f:
             f.write("#!/bin/sh\n")
-            # Export Wayland env vars so both processes inherit them
+            # Export Wayland env vars so wf-recorder can connect to cage
             f.write(f'export XDG_RUNTIME_DIR="{managed.runtime_dir}"\n')
             f.write(f'export WAYLAND_DISPLAY="{managed.wayland_display}"\n')
             f.write(f'export HOME="{os.path.expanduser("~")}"\n')
-            # Log wf-recorder and ffmpeg stderr to separate files for diagnostics
-            f.write(f'{wf_str} 2>{shlex.quote(wf_log)}'
-                    f' | {ffmpeg_str} 2>{shlex.quote(ffmpeg_log)}\n')
+            # wf-recorder outputs directly to the multicast URL (no pipe)
+            f.write(f'{wf_str} 2>{shlex.quote(wf_log)}\n')
         os.chmod(pipeline_script, 0o755)
 
         logger.info("Starting capture pipeline via script: %s", pipeline_script)
@@ -728,16 +672,15 @@ user_pref("dom.disable_window_move_resize", false);
                              managed.ffmpeg_proc.returncode)
             return False
 
-        # Log diagnostics from the capture processes
-        for log_label, log_path in [("wf-recorder", wf_log), ("ffmpeg", ffmpeg_log)]:
-            try:
-                if os.path.exists(log_path):
-                    with open(log_path, "r") as lf:
-                        content = lf.read(2000)
-                    if content.strip():
-                        logger.info("%s log:\n%s", log_label, content.strip()[:500])
-            except OSError:
-                pass
+        # Log diagnostics from wf-recorder
+        try:
+            if os.path.exists(wf_log):
+                with open(wf_log, "r") as lf:
+                    content = lf.read(2000)
+                if content.strip():
+                    logger.info("wf-recorder log:\n%s", content.strip()[:500])
+        except OSError:
+            pass
 
         logger.info("Capture pipeline running (shell pid=%d)", managed.ffmpeg_proc.pid)
         return True
