@@ -545,11 +545,16 @@ user_pref("dom.disable_window_move_resize", false);
         """Start the wf-recorder → ffmpeg capture and encoding pipeline.
 
         wf-recorder captures the cage compositor's output via the wlroots
-        screencopy protocol and pipes raw video frames to ffmpeg. ffmpeg
-        encodes (H.264/H.265), muxes to MPEG-TS, and sends via UDP multicast.
+        screencopy protocol, encodes to H.264/H.265, and outputs MPEG-TS
+        to a pipe. ffmpeg reads the encoded video, adds a silent audio
+        track (or PulseAudio capture), and outputs the final MPEG-TS
+        multicast stream with video passthrough (-c:v copy).
 
-        This two-process pipeline replaces the single ffmpeg x11grab command
-        used in the container approach, but avoids the container overhead.
+        Encoding is done in wf-recorder rather than ffmpeg because
+        wf-recorder's rawvideo pipe output is broken with the pixman
+        renderer's native pixel format (gbrp/0bgr) — the screencopy
+        loop stalls after one frame. Using wf-recorder's internal
+        encoder avoids this code path entirely.
         """
         resolution = stream.resolution or "1920x1080"
         codec = stream.codec or "h264"
@@ -573,35 +578,65 @@ user_pref("dom.disable_window_move_resize", false);
         # --- Build wf-recorder command ---
         # wf-recorder captures cage's display via wlr-screencopy-unstable-v1.
         # --no-dmabuf forces SHM buffers since the pixman renderer can't do DMA-BUF.
-        # NUT muxer is used instead of rawvideo because it carries format metadata
-        # (resolution, pixel format) and handles the format conversion properly.
-        # The pixman renderer delivers frames in GBRP/GBR colorspace; NUT lets
-        # ffmpeg auto-detect the format instead of requiring an exact match.
+        #
+        # wf-recorder handles both capture AND video encoding. The rawvideo pipe
+        # approach failed because wf-recorder's screencopy loop breaks when it
+        # can't convert from the compositor's native pixel format (gbrp/0bgr from
+        # pixman) to bgr0 — it receives one frame then goes idle. By having
+        # wf-recorder encode to H.264 internally (using its linked libavcodec),
+        # the pixel format conversion happens in a well-tested code path.
+        #
+        # wf-recorder outputs MPEG-TS to the pipe, then ffmpeg just adds audio
+        # and remuxes (video is passed through with -c:v copy).
+        capture_res = "1280x720"  # cage headless default (wlroots 0.18)
+        need_scale = (capture_res != resolution)
+
+        # wf-recorder's -p flag passes codec parameters (key=value)
+        bitrate_num = int("".join(c for c in bitrate if c.isdigit()))
+
+        # Select encoder matching the stream's configured codec
+        if codec == "h265":
+            wf_encoder = "libx265"
+            wf_codec_params = [
+                "-p", "preset=fast",
+                "-p", f"b={bitrate_num * 1000000}",
+                # x265 uses x265-params for VBV and keyframe settings
+                "-p", f"x265-params=vbv-bufsize={bitrate_num * 2000}"
+                      f":vbv-maxrate={bitrate_num * 1000}"
+                      f":min-keyint={gop_size}:keyint={gop_size}",
+            ]
+        else:
+            wf_encoder = "libx264"
+            wf_codec_params = [
+                "-p", "profile=main",
+                "-p", "preset=ultrafast",
+                "-p", f"b={bitrate_num * 1000000}",
+                "-p", f"g={gop_size}",
+            ]
+
         wf_parts = [
             config.WF_RECORDER_PATH,
             "-y",
             "--no-dmabuf",
-            "--muxer", "nut",
-            "--codec", "rawvideo",
+            "--muxer", "mpegts",
+            "-c", wf_encoder,
+            *wf_codec_params,
             "-f", str(framerate),
-            # Use pipe:1 instead of /dev/stdout — libavformat's file protocol
-            # handler may attempt seek() on /dev/stdout which fails on pipes.
-            # The pipe protocol knows the output is non-seekable.
             "--file", "pipe:1",
         ]
 
-        # --- Build ffmpeg command: raw video from pipe → encode → multicast ---
-        # wf-recorder captures at cage's actual output resolution, which may differ
-        # from the stream's configured resolution if WLR_HEADLESS_RESOLUTION is not
-        # honored (wlroots 0.18 defaults to 1280x720). ffmpeg auto-detects the
-        # input format from the NUT container, then scales to the desired output.
-        capture_res = "1280x720"  # cage headless default (wlroots 0.18)
-        need_scale = (capture_res != resolution)
+        # If we need to scale, use wf-recorder's built-in filter
+        if need_scale:
+            wf_parts.extend(["--filter", f"scale={width}:{height}"])
 
+        # --- Build ffmpeg command: add audio + remux from pipe ---
+        # wf-recorder delivers encoded H.264 in MPEG-TS via the pipe.
+        # ffmpeg adds a silent audio track (or PulseAudio capture) and outputs
+        # the final MPEG-TS multicast stream. Video is passed through (-c:v copy).
         ffmpeg_parts = [
             config.FFMPEG_PATH, "-y",
             "-thread_queue_size", "512",
-            "-f", "nut",
+            "-f", "mpegts",
             "-i", "pipe:0",
         ]
 
@@ -623,44 +658,8 @@ user_pref("dom.disable_window_move_resize", false);
                 "-i", "anullsrc=r=48000:cl=stereo",
             ])
 
-        # Constant frame rate enforcement
-        ffmpeg_parts.extend(["-vsync", "cfr", "-r", str(framerate)])
-
-        # Scale to the stream's configured resolution if capture size differs
-        if need_scale:
-            ffmpeg_parts.extend(["-vf", f"scale={width}:{height}"])
-
-        # Parse bitrate number for VBV calculations
-        bitrate_num = int("".join(c for c in bitrate if c.isdigit()))
-
-        # Video encoder selection based on codec
-        if codec == "h265":
-            bufsize_kbps = bitrate_num * 1000 * 2
-            maxrate_kbps = bitrate_num * 1000
-            ffmpeg_parts.extend([
-                "-c:v", "libx265",
-                "-profile:v", "main",
-                "-preset", "fast",
-                "-b:v", bitrate,
-                "-x265-params",
-                f"vbv-bufsize={bufsize_kbps}:vbv-maxrate={maxrate_kbps}"
-                f":nal-hrd=cbr:min-keyint={gop_size}:keyint={gop_size}",
-                "-pix_fmt", "yuv420p",
-            ])
-        else:
-            bufsize = f"{bitrate_num}M"
-            ffmpeg_parts.extend([
-                "-c:v", "libx264",
-                "-profile:v", "main",
-                "-preset", "ultrafast",
-                "-b:v", bitrate,
-                "-minrate", bitrate,
-                "-maxrate", bitrate,
-                "-bufsize", bufsize,
-                "-nal-hrd", "cbr",
-                "-pix_fmt", "yuv420p",
-                "-g", str(gop_size),
-            ])
+        # Video passthrough — already encoded by wf-recorder
+        ffmpeg_parts.extend(["-c:v", "copy"])
 
         # Audio encoding + MPEG-TS output
         ffmpeg_parts.extend([
