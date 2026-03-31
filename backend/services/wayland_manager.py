@@ -247,8 +247,12 @@ class WaylandManager:
         env["WLR_HEADLESS_OUTPUTS"] = "1"
         width, height = resolution.split("x")
         env["WLR_HEADLESS_RESOLUTION"] = f"{width}x{height}"
-        # Force pixman (software) renderer — no GPU/DRM render node on headless servers
-        env["WLR_RENDERER"] = "pixman"
+        # Use llvmpipe (software OpenGL) instead of pixman. Pixman delivers
+        # screencopy frames with mismatched colorspace metadata (gbrp/unknown)
+        # that crashes wf-recorder's internal filter graph after one frame.
+        # llvmpipe provides standard RGBA colorspace that wf-recorder handles.
+        env["WLR_RENDERER"] = "gles2"
+        env["LIBGL_ALWAYS_SOFTWARE"] = "1"
         # Merge any application-specific env vars (e.g., MOZ_ENABLE_WAYLAND for Firefox)
         if app_env:
             env.update(app_env)
@@ -416,8 +420,8 @@ user_pref("dom.disable_window_move_resize", false);
             # can connect to via the standard X11 path.
             "SAL_USE_VCLPLUGIN": "gen",
             # Disable glamor (GPU-accelerated rendering) in XWayland.
-            # With pixman software renderer, XWayland's glamor can't get GBM
-            # interfaces from the compositor, causing a fatal error (rc=81).
+            # On headless servers without a GPU, XWayland's glamor can't get
+            # proper GBM interfaces, causing a fatal error (rc=81).
             # This forces XWayland to use software acceleration instead.
             "XWAYLAND_NO_GLAMOR": "1",
         }
@@ -577,7 +581,8 @@ user_pref("dom.disable_window_move_resize", false);
 
         # --- Build wf-recorder command ---
         # wf-recorder captures cage's display via wlr-screencopy-unstable-v1.
-        # --no-dmabuf forces SHM buffers since the pixman renderer can't do DMA-BUF.
+        # --no-dmabuf forces SHM buffers — llvmpipe may not have a DRM render node
+        # for DMA-BUF export on headless servers without a GPU.
         #
         # wf-recorder handles both capture AND video encoding. The rawvideo pipe
         # approach failed because wf-recorder's screencopy loop breaks when it
