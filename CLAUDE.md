@@ -81,7 +81,7 @@ Mediacaster is a web-based MPEG-TS multicast playout system. Users upload media 
 8. ~~**ExecStartPre in systemd**~~ — Fixed. `+` prefix added for root execution.
 
 ### Important
-(none currently)
+9. **Native 1080p rendering** — cage/wlroots 0.18 ignores `WLR_HEADLESS_RESOLUTION` and defaults to 1280x720. Currently upscaling 720→1080 via wf-recorder's scale filter. Investigate cage `--` output mode flags, weston headless, or wlr-output-management protocol to set native 1080p resolution and eliminate the upscale step.
 
 ### Resolved (2026-03-17, batch 2)
 3. ~~**nginx noVNC proxy**~~ — Removed. Direct websockify port access is the stable solution; the fragile regex proxy block has been deleted from nginx config.
@@ -103,8 +103,20 @@ Mediacaster is a web-based MPEG-TS multicast playout system. Users upload media 
 - Thumbnails/previews served without auth (img tags can't send JWT headers)
 - Schema migrations handled by Alembic (`alembic/` directory, `alembic.ini`)
 - wf-recorder and ydotool are source-built to `/usr/local/bin/` (not available as RPMs)
+- wf-recorder 0.6.0 requires two fixes: (1) colorspace patch in deploy.sh (`frame->colorspace = AVCOL_SPC_RGB` in frame-writer.cpp), (2) `-D` flag at runtime to disable damage-based capture (otherwise hangs on static content)
 - `deploy.sh` runs as root, service runs as `mcs` user
 - The `mcs` system user has `/sbin/nologin` shell — use `sudo -u mcs` for git operations
+
+## SSH to Dev Server
+The reliable pattern for remote server operations (avoids ANSI prompt/expect issues):
+1. Write a self-contained bash script locally (e.g., `/tmp/myscript.sh`)
+2. Upload: `scp /tmp/myscript.sh mfpadmin@10.2.0.15:/tmp/myscript.sh`
+3. Run non-interactively: `ssh mfpadmin@10.2.0.15 "echo 'PASSWORD' | sudo -S bash /tmp/myscript.sh 2>&1"`
+4. For mcs user operations: `sudo -u mcs bash -c '...'` inside the script
+5. Git operations: `sudo -u mcs git -C /opt/multicast-streamer pull origin main`
+- Use `expect` for password automation (match `"password:"` prompt)
+- Do NOT use interactive `expect "$ "` prompt matching — ANSI escape codes break it
+- Do NOT use `sshpass` — unreliable on this target
 
 ## Git Workflow
 - Remote: https://github.com/RobarePruyn/Mediacaster.git
