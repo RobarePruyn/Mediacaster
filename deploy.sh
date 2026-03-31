@@ -134,13 +134,18 @@ dnf install -y gcc gcc-c++ meson ninja-build cmake scdoc \
     libdrm-devel pulseaudio-libs-devel
 
 # Build wf-recorder from source — wlroots screencopy-based screen recorder.
-# Not available as an RPM on AlmaLinux 10. Used to capture weston's output
-# and pipe raw video frames to ffmpeg for encoding.
+# Not available as an RPM on AlmaLinux 10. Used to capture the compositor's
+# output via wlr-screencopy and encode/mux to MPEG-TS multicast.
+# Patched to fix colorspace mismatch bug (ammen99/wf-recorder#287): pixman
+# delivers frames with AVCOL_SPC_UNSPECIFIED but the filter graph expects
+# AVCOL_SPC_RGB. Without the patch, capture stalls after one frame.
 if ! command -v wf-recorder &>/dev/null; then
-    log_info "Building wf-recorder from source..."
+    log_info "Building wf-recorder from source (with colorspace patch)..."
     cd /tmp
     git clone https://github.com/ammen99/wf-recorder.git
     cd wf-recorder
+    sed -i '/frame->height = params.height;/a\
+    frame->colorspace = AVCOL_SPC_RGB;' src/frame-writer.cpp
     meson setup build --prefix=/usr/local
     ninja -C build
     ninja -C build install
