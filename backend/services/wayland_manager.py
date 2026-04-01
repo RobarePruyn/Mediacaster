@@ -594,24 +594,40 @@ user_pref("dom.disable_window_move_resize", false);
         # wf-recorder's -p flag passes codec parameters (key=value)
         bitrate_num = int("".join(c for c in bitrate if c.isdigit()))
 
-        # Select encoder matching the stream's configured codec
+        # Select encoder matching the stream's configured codec.
+        # wf-recorder defaults to tune=zerolatency and crf=20. We override
+        # crf with our bitrate target and add VBV for consistent multicast
+        # output. The fps filter limits capture to the target framerate since
+        # -D delivers frames at compositor rate (typically 60fps).
+        bitrate_bps = bitrate_num * 1000000
+        bitrate_kbps = bitrate_num * 1000
+
         if codec == "h265":
             wf_encoder = "libx265"
             wf_codec_params = [
                 "-p", "preset=fast",
-                "-p", f"b={bitrate_num * 1000000}",
-                "-p", f"x265-params=vbv-bufsize={bitrate_num * 2000}"
-                      f":vbv-maxrate={bitrate_num * 1000}"
+                "-p", f"b={bitrate_bps}",
+                "-p", f"x265-params=vbv-bufsize={bitrate_kbps * 2}"
+                      f":vbv-maxrate={bitrate_kbps}"
                       f":min-keyint={gop_size}:keyint={gop_size}",
             ]
         else:
             wf_encoder = "libx264"
             wf_codec_params = [
-                "-p", "profile=main",
-                "-p", "preset=ultrafast",
-                "-p", f"b={bitrate_num * 1000000}",
+                "-p", "profile=high",
+                "-p", "preset=fast",
+                "-p", f"b={bitrate_bps}",
                 "-p", f"g={gop_size}",
+                "-p", f"x264-params=vbv-maxrate={bitrate_kbps}"
+                      f":vbv-bufsize={bitrate_kbps}",
             ]
+
+        # Build the filter chain: fps limiter first (drops excess frames
+        # before scaling to save CPU), then optional scale.
+        filters = [f"fps={framerate}"]
+        if capture_res != resolution:
+            filters.append(f"scale={width}:{height}")
+        filter_str = ",".join(filters)
 
         wf_parts = [
             config.WF_RECORDER_PATH,
@@ -623,11 +639,8 @@ user_pref("dom.disable_window_move_resize", false);
             *wf_codec_params,
             "-f", str(framerate),
             "--file", multicast_url,
+            "--filter", filter_str,
         ]
-
-        # Re-enable scaling now that the colorspace patch is applied.
-        if need_scale:
-            wf_parts.extend(["--filter", f"scale={width}:{height}"])
 
         # Write the capture command as a shell script with Wayland env vars.
         import shlex
