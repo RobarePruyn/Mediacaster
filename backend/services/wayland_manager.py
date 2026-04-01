@@ -636,6 +636,14 @@ user_pref("dom.disable_window_move_resize", false);
             filters.append(f"scale={width}:{height}")
         filter_str = ",".join(filters)
 
+        # wf-recorder encodes to a local FIFO; ffmpeg reads the FIFO and
+        # remuxes to CBR MPEG-TS with proper PCR/null-padding. This is
+        # critical: wf-recorder's muxer dumps frame packets in bursts with
+        # no transport pacing, which causes decoder stutter on professional
+        # receivers (VITEC, VLC). ffmpeg's -muxrate adds null packets for
+        # constant bitrate transport and regular PCR insertion.
+        fifo_path = os.path.join(managed.runtime_dir, "wf_pipe.ts")
+
         wf_parts = [
             config.WF_RECORDER_PATH,
             "-y",
@@ -645,15 +653,31 @@ user_pref("dom.disable_window_move_resize", false);
             "-c", wf_encoder,
             *wf_codec_params,
             "-f", str(framerate),
-            "--file", multicast_url,
+            "--file", fifo_path,
             "--filter", filter_str,
+        ]
+
+        # ffmpeg remuxer: read FIFO, passthrough video, output CBR multicast.
+        # -muxrate sets the total TS bitrate (video + null padding).
+        # Set to 1.5x the video bitrate to leave room for I-frame overhead.
+        muxrate = int(bitrate_bps * 1.5)
+        ffmpeg_parts = [
+            "ffmpeg", "-re",
+            "-fflags", "+genpts",
+            "-i", fifo_path,
+            "-c", "copy",
+            "-muxrate", str(muxrate),
+            "-pcr_period", "20",
+            "-f", "mpegts", multicast_url,
         ]
 
         # Write the capture command as a shell script with Wayland env vars.
         import shlex
         wf_str = " ".join(shlex.quote(p) for p in wf_parts)
+        ffmpeg_str = " ".join(shlex.quote(p) for p in ffmpeg_parts)
 
         wf_log = os.path.join(managed.runtime_dir, "wf-recorder.log")
+        ffmpeg_log = os.path.join(managed.runtime_dir, "ffmpeg-remux.log")
 
         pipeline_script = os.path.join(managed.runtime_dir, "capture.sh")
         with open(pipeline_script, "w") as f:
@@ -662,8 +686,17 @@ user_pref("dom.disable_window_move_resize", false);
             f.write(f'export XDG_RUNTIME_DIR="{managed.runtime_dir}"\n')
             f.write(f'export WAYLAND_DISPLAY="{managed.wayland_display}"\n')
             f.write(f'export HOME="{os.path.expanduser("~")}"\n')
-            # wf-recorder outputs directly to the multicast URL (no pipe)
+            # Create FIFO for wf-recorder → ffmpeg data transfer
+            f.write(f'rm -f {shlex.quote(fifo_path)}\n')
+            f.write(f'mkfifo {shlex.quote(fifo_path)}\n')
+            # Start ffmpeg remuxer in background (reads FIFO)
+            f.write(f'{ffmpeg_str} 2>{shlex.quote(ffmpeg_log)} &\n')
+            f.write('FFMPEG_PID=$!\n')
+            # wf-recorder writes encoded MPEG-TS to FIFO (foreground)
             f.write(f'{wf_str} 2>{shlex.quote(wf_log)}\n')
+            # Cleanup on exit
+            f.write('kill $FFMPEG_PID 2>/dev/null\n')
+            f.write(f'rm -f {shlex.quote(fifo_path)}\n')
         os.chmod(pipeline_script, 0o755)
 
         logger.info("Starting capture pipeline via script: %s", pipeline_script)
