@@ -225,6 +225,21 @@ class StreamManager:
             if not ready:
                 raise ValueError("No ready assets in the playlist")
 
+            # Runtime conflict check: verify no other running stream is using the
+            # same multicast address:port. The DB-level check at update time can
+            # miss races (e.g., address changed but not yet restarted).
+            conflict = db.query(Stream).filter(
+                Stream.multicast_address == stream.multicast_address,
+                Stream.multicast_port == stream.multicast_port,
+                Stream.id != stream_id,
+                Stream.status == StreamStatus.RUNNING,
+            ).first()
+            if conflict:
+                raise ValueError(
+                    f"Multicast {stream.multicast_address}:{stream.multicast_port} "
+                    f"is already in use by running stream '{conflict.name}' (id={conflict.id})"
+                )
+
             concat_path = self._generate_concat_file(stream, db)
             cmd = self._build_playout_cmd(concat_path, stream)
             logger.info("Starting stream %d: %s", stream_id, " ".join(cmd))

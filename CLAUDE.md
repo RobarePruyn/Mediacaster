@@ -1,7 +1,7 @@
 # CLAUDE.md — Mediacaster Project Context
 
 ## What This Is
-Mediacaster is a web-based MPEG-TS multicast playout system. Users upload media (video, image, audio), build playlists, and stream them as UDP multicast. It also supports browser source capture — a virtual Firefox instance whose display is captured and streamed as multicast.
+Mediacaster is a web-based MPEG-TS multicast playout system. Users upload media (video, image, audio), build playlists, and stream them as UDP multicast. It also supports browser source capture — a virtual Chromium instance (with SwiftShader software WebGL) whose display is captured and streamed as multicast.
 
 ## Architecture
 
@@ -20,7 +20,7 @@ Mediacaster is a web-based MPEG-TS multicast playout system. Users upload media 
 - **Services:**
   - `backend/services/transcoder.py` — normalizes all uploads to H.264/AAC. Video, image (black+duration), and audio (black video + source audio). Progress tracking via ffmpeg `-progress pipe:1`
   - `backend/services/stream_manager.py` — manages ffmpeg concat→multicast subprocesses for playlist streams, auto-restart on crash
-  - `backend/services/wayland_manager.py` — manages native Wayland capture pipelines for browser/presentation sources. Each source runs weston headless + Firefox/LibreOffice + wf-recorder + ffmpeg + wayvnc + websockify as native processes (no containers)
+  - `backend/services/wayland_manager.py` — manages native Wayland capture pipelines for browser/presentation sources. Each source runs cage headless + Chromium/LibreOffice + wf-recorder + ffmpeg + wayvnc + websockify as native processes (no containers)
   - `backend/services/browser_manager.py` — DEPRECATED: old Podman container-based approach, replaced by wayland_manager.py
   - `backend/services/monitor.py` — psutil-based CPU/RAM/network monitoring, per-PID stats
 
@@ -39,7 +39,7 @@ Mediacaster is a web-based MPEG-TS multicast playout system. Users upload media 
 
 ### Browser/Presentation Source Capture (Native Wayland Pipeline)
 - **Manager:** `backend/services/wayland_manager.py` — manages native Wayland process groups per stream (replaces container-based approach)
-- **Pipeline:** weston headless → Firefox/LibreOffice → wf-recorder (screencopy) → ffmpeg (encode) → MPEG-TS UDP multicast
+- **Pipeline:** cage headless → Chromium (SwiftShader)/LibreOffice → wf-recorder (screencopy) → ffmpeg (encode) → MPEG-TS UDP multicast
 - **VNC Preview:** wayvnc + websockify → noVNC iframe in the UI
 - **Input:** ydotool for presentation slide control (replaces xdotool)
 - **Legacy:** `container/` directory contains the old Podman-based entrypoint and Containerfile (deprecated)

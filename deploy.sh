@@ -124,8 +124,8 @@ fi
 
 # Wayland capture pipeline — native process-based browser/presentation source capture.
 # Replaces the Podman container approach for lower overhead and better encoding quality.
-log_info "Installing Wayland capture stack (weston, wayvnc, Firefox, websockify)..."
-dnf install -y weston wayvnc firefox python3-websockify
+log_info "Installing Wayland capture stack (weston, wayvnc, Chromium, websockify)..."
+dnf install -y weston wayvnc chromium python3-websockify
 
 # Build dependencies for wf-recorder and ydotool (source builds)
 log_info "Installing build dependencies for wf-recorder and ydotool..."
@@ -638,7 +638,7 @@ dnf remove -y \
 # Protect application dependencies from autoremove, then clean up orphans
 log_info "Cleaning up orphaned dependencies..."
 dnf mark install postgresql-server postgresql python3 nginx ffmpeg nodejs openssl \
-    weston wayvnc firefox python3-websockify \
+    weston wayvnc chromium python3-websockify \
     gcc gcc-c++ meson ninja-build cmake \
     wlroots-devel wayland-devel ffmpeg-devel 2>/dev/null || true
 dnf autoremove -y

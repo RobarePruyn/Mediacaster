@@ -24,7 +24,7 @@ RBAC model:
 
 Three source types:
 - PLAYLIST: ffmpeg concat loop of transcoded assets → MPEG-TS multicast
-- BROWSER: Wayland capture (weston + Firefox + wf-recorder + ffmpeg → MPEG-TS multicast)
+- BROWSER: Wayland capture (cage + Chromium + wf-recorder + ffmpeg → MPEG-TS multicast)
 - PRESENTATION: Wayland capture (weston + LibreOffice Impress + wf-recorder + ffmpeg → MPEG-TS multicast)
 """
 
@@ -276,19 +276,30 @@ def get_stream(stream_id: int, db: Session = Depends(get_db),
 
 
 @router.put("/{stream_id}", response_model=StreamResponse)
-def update_stream(stream_id: int, body: StreamUpdate, db: Session = Depends(get_db),
-                  current_user: User = Depends(get_current_user)):
+async def update_stream(stream_id: int, body: StreamUpdate, request: Request,
+                        db: Session = Depends(get_db),
+                        current_user: User = Depends(get_current_user)):
     """Update stream configuration (name, multicast address/port, playback mode). Admin only.
 
     Supports partial updates — only fields that are explicitly provided (not None)
-    are changed. Note: changing multicast settings on a running stream requires
-    a restart to take effect.
+    are changed. If multicast or encoding settings change on a running stream,
+    the stream is automatically restarted with the new config.
     """
     if not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Admin privileges required")
     stream = db.query(Stream).filter(Stream.id == stream_id).first()
     if not stream:
         raise HTTPException(status_code=404, detail="Stream not found")
+
+    # Snapshot settings that affect the running pipeline so we can detect changes
+    old_address = stream.multicast_address
+    old_port = stream.multicast_port
+    old_resolution = stream.resolution
+    old_codec = stream.codec
+    old_framerate = stream.framerate
+    old_bitrate = stream.video_bitrate
+    old_gop = stream.gop_size
+
     if body.name is not None: stream.name = body.name
     if body.multicast_address is not None: stream.multicast_address = body.multicast_address
     if body.multicast_port is not None: stream.multicast_port = body.multicast_port
@@ -326,7 +337,64 @@ def update_stream(stream_id: int, body: StreamUpdate, db: Session = Depends(get_
 
     db.commit()
     db.refresh(stream)
-    return _to_response(stream)
+
+    # Detect whether any pipeline-affecting settings changed on a running stream.
+    # If so, automatically restart so the new config takes effect immediately.
+    pipeline_changed = (
+        stream.multicast_address != old_address
+        or stream.multicast_port != old_port
+        or stream.resolution != old_resolution
+        or stream.codec != old_codec
+        or stream.framerate != old_framerate
+        or stream.video_bitrate != old_bitrate
+        or stream.gop_size != old_gop
+    )
+    restarted = False
+
+    if pipeline_changed and stream.status == StreamStatus.RUNNING:
+        logger.info("Pipeline config changed on running stream %d — auto-restarting", stream_id)
+        try:
+            if stream.source_type in (StreamSourceType.BROWSER, StreamSourceType.PRESENTATION):
+                bm = request.app.state.browser_manager
+                await bm.stop_browser(stream_id)
+                if stream.source_type == StreamSourceType.PRESENTATION:
+                    presentation = db.query(Presentation).filter(
+                        Presentation.id == stream.browser_source.presentation_id
+                    ).first()
+                    if presentation and presentation.file_path:
+                        await bm.start_presentation(
+                            stream_id, presentation.file_path,
+                            stream.browser_source.capture_audio,
+                            stream.multicast_address, stream.multicast_port,
+                        )
+                else:
+                    await bm.start_browser(
+                        stream_id, stream.browser_source.url,
+                        stream.browser_source.capture_audio,
+                        stream.multicast_address, stream.multicast_port,
+                    )
+                stream.status = StreamStatus.RUNNING
+                db.commit()
+            else:
+                sm = request.app.state.stream_manager
+                await sm.stop_stream(stream_id)
+                await sm.start_stream(stream_id)
+            restarted = True
+        except (ValueError, Exception) as exc:
+            logger.error("Auto-restart failed for stream %d: %s", stream_id, exc)
+            stream.status = StreamStatus.ERROR
+            stream.ffmpeg_pid = None
+            db.commit()
+            raise HTTPException(
+                status_code=500,
+                detail=f"Config updated but restart failed: {exc}",
+            )
+
+    resp = _to_response(stream)
+    if restarted:
+        resp["restarted"] = True
+        resp["restart_reason"] = "Pipeline settings changed — stream automatically restarted"
+    return resp
 
 
 @router.delete("/{stream_id}", status_code=204)
@@ -533,7 +601,7 @@ async def start_stream(stream_id: int, request: Request, db: Session = Depends(g
     """Start a stream. Dispatches to browser_manager or stream_manager based on source type.
 
     For BROWSER/PRESENTATION streams: launches a native Wayland capture pipeline
-    (weston + Firefox/LibreOffice + wf-recorder + ffmpeg → MPEG-TS multicast).
+    (cage + Chromium/LibreOffice + wf-recorder + ffmpeg → MPEG-TS multicast).
 
     For PLAYLIST streams: starts an ffmpeg concat loop process that reads the
     playlist items and outputs MPEG-TS multicast.

@@ -8,12 +8,12 @@ overhead that contributed to CPU contention and encoding quality degradation
 
 Manages two source types that share the same capture pipeline:
 
-  BROWSER:      Firefox kiosk mode renders a web URL
+  BROWSER:      Chromium kiosk mode renders a web URL (SwiftShader for software WebGL)
   PRESENTATION: LibreOffice Impress renders a slideshow natively
 
 Each source runs as an isolated set of native processes:
     - cage (wlroots kiosk compositor running the app fullscreen)
-    - Firefox or LibreOffice Impress (launched by cage as its client)
+    - Chromium or LibreOffice Impress (launched by cage as its client)
     - wf-recorder (wlroots screencopy → raw video pipe)
     - ffmpeg (encode + mux → MPEG-TS UDP multicast)
     - wayvnc (VNC server for interactive preview)
@@ -249,7 +249,7 @@ class WaylandManager:
         env["WLR_HEADLESS_RESOLUTION"] = f"{width}x{height}"
         # Force pixman (software) renderer — no GPU/DRM render node on headless servers
         env["WLR_RENDERER"] = "pixman"
-        # Merge any application-specific env vars (e.g., MOZ_ENABLE_WAYLAND for Firefox)
+        # Merge any application-specific env vars from the browser/app builder
         if app_env:
             env.update(app_env)
 
@@ -330,72 +330,68 @@ class WaylandManager:
             return max(new_sockets)
         return None
 
-    def _build_firefox_cmd(self, managed: ManagedSource, url: str,
-                           resolution: str) -> tuple:
-        """Build Firefox command and env for kiosk mode.
+    def _build_chromium_cmd(self, managed: ManagedSource, url: str,
+                            resolution: str) -> tuple:
+        """Build Chromium command and env for kiosk mode.
 
-        Creates a disposable profile with optimized settings for headless
-        kiosk operation (no telemetry, no GPU accel, H.264 decode preference).
+        Chromium with SwiftShader provides software-based WebGL rendering
+        without requiring a hardware GPU — essential for canvas/WebGL-heavy
+        sites (Rive, Pixi.js, Three.js) running in a headless compositor.
 
         Returns (cmd_list, env_dict) for use with _start_cage().
         """
         width, height = resolution.split("x")
-        env = {
-            # Force Wayland backend — Firefox defaults to X11 if both are available
-            "MOZ_ENABLE_WAYLAND": "1",
-            # Disable GPU compositing — no real GPU in headless compositor
-            "MOZ_WEBRENDER": "0",
-        }
 
-        # Create a disposable profile directory
-        profile_dir = os.path.join(managed.runtime_dir, "firefox_profile")
-        os.makedirs(profile_dir, exist_ok=True)
-
-        # Write user.js preferences for kiosk operation
-        user_js = os.path.join(profile_dir, "user.js")
-        with open(user_js, "w") as f:
-            f.write("""\
-// Disable first-run, updates, telemetry
-user_pref("browser.shell.checkDefaultBrowser", false);
-user_pref("datareporting.policy.dataSubmissionEnabled", false);
-user_pref("toolkit.telemetry.enabled", false);
-user_pref("app.update.enabled", false);
-user_pref("browser.startup.homepage_override.mstone", "ignore");
-user_pref("browser.aboutConfig.showWarning", false);
-user_pref("browser.tabs.warnOnClose", false);
-user_pref("browser.sessionstore.resume_from_crash", false);
-// Disable hardware acceleration — no real GPU in headless compositor
-user_pref("layers.acceleration.disabled", true);
-user_pref("gfx.xrender.enabled", false);
-// Force H.264 for web video playback — VP9/AV1 are too CPU-expensive
-user_pref("media.mediasource.vp9.enabled", false);
-user_pref("media.av1.enabled", false);
-// Reduce compositor overhead
-user_pref("apz.allow_zooming", false);
-user_pref("general.smoothScroll", false);
-// Single content process for kiosk mode
-user_pref("dom.ipc.processCount", 1);
-// Prevent safe mode prompt after crash
-user_pref("toolkit.startup.max_resumed_crashes", -1);
-// Force single window, suppress fullscreen prompts
-user_pref("browser.link.open_newwindow", 1);
-user_pref("browser.link.open_newwindow.restriction", 0);
-user_pref("full-screen-api.warning.timeout", 0);
-user_pref("full-screen-api.approval-required", false);
-user_pref("dom.disable_window_move_resize", false);
-""")
-            # Resolution-dependent window geometry prefs
-            f.write(f'user_pref("browser.window.width", {width});\n')
-            f.write(f'user_pref("browser.window.height", {height});\n')
+        # Create a disposable user data directory
+        data_dir = os.path.join(managed.runtime_dir, "chromium_data")
+        os.makedirs(data_dir, exist_ok=True)
 
         cmd = [
-            config.FIREFOX_PATH,
-            "--no-remote",
-            "--profile", profile_dir,
-            "--kiosk", url,
+            config.CHROMIUM_PATH,
+            # Kiosk mode: fullscreen, no browser chrome
+            "--kiosk",
+            # Wayland backend (Chromium uses ozone platform layer)
+            "--ozone-platform=wayland",
+            # No sandbox — running as dedicated mcs service user
+            "--no-sandbox",
+            # Vulkan SwiftShader: software WebGL without a real GPU.
+            # AlmaLinux Chromium ships libvk_swiftshader.so (Vulkan) but
+            # not the ANGLE SwiftShader library, so we route ANGLE through
+            # Vulkan SwiftShader for WebGL support.
+            "--enable-unsafe-swiftshader",
+            "--use-vulkan=swiftshader",
+            "--enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE",
+            # Window geometry
+            f"--window-size={width},{height}",
+            # Disposable profile
+            f"--user-data-dir={data_dir}",
+            # Suppress first-run dialogs and popups
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-default-apps",
+            "--disable-translate",
+            "--disable-sync",
+            "--disable-background-networking",
+            "--disable-extensions",
+            # Disable crash reporter and telemetry
+            "--disable-breakpad",
+            "--metrics-recording-only",
+            "--no-report-upload",
+            # Single process for tab rendering (reduce overhead)
+            "--renderer-process-limit=1",
+            # Hide scrollbars in kiosk content
+            "--hide-scrollbars",
+            # Disable features that waste CPU in kiosk mode
+            "--disable-smooth-scrolling",
+            "--autoplay-policy=no-user-gesture-required",
+            # The URL to load
+            url,
         ]
 
-        logger.info("Firefox command prepared: %s", url)
+        # No special env vars needed — Chromium handles Wayland natively
+        env = {}
+
+        logger.info("Chromium command prepared: %s", url)
         return cmd, env
 
     def _build_libreoffice_cmd(self, managed: ManagedSource,
@@ -497,7 +493,7 @@ user_pref("dom.disable_window_move_resize", false);
     async def _start_audio(self, managed: ManagedSource) -> Optional[str]:
         """Set up PulseAudio virtual sink for audio capture.
 
-        Creates a null-sink that the application (Firefox/LibreOffice) routes
+        Creates a null-sink that the application (Chromium/LibreOffice) routes
         audio to. ffmpeg captures from the sink's monitor source. Uses
         pipewire-pulseaudio compatibility layer on AL10.
 
@@ -897,13 +893,30 @@ user_pref("dom.disable_window_move_resize", false);
         display_num = self._allocate_display()
         managed = ManagedSource(stream_id, display_num)
 
-        # Read the stream's encoding profile from DB
+        # Read the stream's encoding profile from DB and check for multicast conflicts
         db: Session = self._db_factory()
         try:
             stream = db.query(Stream).filter(Stream.id == stream_id).first()
             if not stream:
                 self._release_display(display_num)
                 raise ValueError(f"Stream {stream_id} not found")
+
+            # Runtime conflict check: verify no other running stream is using the
+            # same multicast address:port. The DB-level check at update time can
+            # miss races (e.g., address changed but not yet restarted).
+            conflict = db.query(Stream).filter(
+                Stream.multicast_address == multicast_address,
+                Stream.multicast_port == multicast_port,
+                Stream.id != stream_id,
+                Stream.status == StreamStatus.RUNNING,
+            ).first()
+            if conflict:
+                self._release_display(display_num)
+                raise ValueError(
+                    f"Multicast {multicast_address}:{multicast_port} "
+                    f"is already in use by running stream '{conflict.name}' (id={conflict.id})"
+                )
+
             resolution = stream.resolution or "1920x1080"
         finally:
             db.close()
@@ -917,18 +930,18 @@ user_pref("dom.disable_window_move_resize", false);
                 app_cmd, app_env = self._build_libreoffice_cmd(
                     managed, presentation_file, resolution)
             else:
-                app_cmd, app_env = self._build_firefox_cmd(managed, url, resolution)
+                app_cmd, app_env = self._build_chromium_cmd(managed, url, resolution)
 
             # Step 3: Start cage compositor with the application embedded.
             # cage is a wlroots kiosk compositor that runs the app fullscreen.
             # Using cage instead of weston because wf-recorder requires the
             # wlr-screencopy-unstable-v1 protocol (a wlroots extension).
             if not await self._start_cage(managed, resolution, app_cmd, app_env):
-                app_name = "LibreOffice Impress" if source_mode == "presentation" else "Firefox"
+                app_name = "LibreOffice Impress" if source_mode == "presentation" else "Chromium"
                 raise ValueError(f"Cage compositor with {app_name} failed to start")
 
             # Wait for the application to initialize inside cage.
-            # LibreOffice needs more time than Firefox to render its first frame.
+            # LibreOffice needs more time than Chromium to render its first frame.
             startup_wait = 8 if source_mode == "presentation" else 5
             logger.info("Waiting %ds for application startup...", startup_wait)
             await asyncio.sleep(startup_wait)
@@ -951,7 +964,7 @@ user_pref("dom.disable_window_move_resize", false);
                 except asyncio.TimeoutError:
                     logger.error("Cage+app exited during startup (rc=%d), stderr read timed out",
                                  managed.weston_proc.returncode)
-                app_name = "LibreOffice Impress" if source_mode == "presentation" else "Firefox"
+                app_name = "LibreOffice Impress" if source_mode == "presentation" else "Chromium"
                 raise ValueError(f"{app_name} failed to start")
 
             # Step 4: Start VNC preview (wayvnc + websockify)
@@ -1030,12 +1043,12 @@ user_pref("dom.disable_window_move_resize", false);
                             multicast_address: str, multicast_port: int) -> dict:
         """Launch a native Wayland capture source for browser streaming.
 
-        Starts the full pipeline: cage → Firefox kiosk → wf-recorder → ffmpeg
+        Starts the full pipeline: cage → Chromium kiosk → wf-recorder → ffmpeg
         → MPEG-TS multicast, with wayvnc/websockify for VNC preview.
 
         Args:
             stream_id: Database ID of the stream
-            url: Web URL to load in Firefox kiosk mode
+            url: Web URL to load in Chromium kiosk mode
             capture_audio: Whether to enable PulseAudio capture
             multicast_address: Destination multicast group
             multicast_port: Destination UDP port
@@ -1056,7 +1069,7 @@ user_pref("dom.disable_window_move_resize", false);
         """Launch a native Wayland capture source for presentation streaming.
 
         Similar to start_browser() but launches LibreOffice Impress in slideshow
-        mode instead of Firefox. Also starts ydotoold for keyboard input injection
+        mode instead of Chromium. Also starts ydotoold for keyboard input injection
         (slide navigation).
 
         Args:
@@ -1336,7 +1349,7 @@ user_pref("dom.disable_window_move_resize", false);
     async def stop_browser(self, stream_id: int):
         """Stop all processes for a capture source and clean up resources.
 
-        Terminates all native processes (cage, Firefox/LO, wf-recorder, ffmpeg,
+        Terminates all native processes (cage, Chromium/LO, wf-recorder, ffmpeg,
         wayvnc, websockify, ydotoold), removes the runtime directory, and clears
         port assignments in the database.
         """
