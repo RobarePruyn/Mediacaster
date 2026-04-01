@@ -595,10 +595,12 @@ user_pref("dom.disable_window_move_resize", false);
         bitrate_num = int("".join(c for c in bitrate if c.isdigit()))
 
         # Select encoder matching the stream's configured codec.
-        # wf-recorder defaults to tune=zerolatency and crf=20. We override
-        # crf with our bitrate target and add VBV for consistent multicast
-        # output. The fps filter limits capture to the target framerate since
-        # -D delivers frames at compositor rate (typically 60fps).
+        # wf-recorder forces tune=zerolatency and crf=20 as defaults, which
+        # disables B-frames, lookahead, and MB-tree — all critical for clean
+        # motion quality. We override these via x264-params since wf-recorder
+        # applies its tune after our -p params.
+        # The fps filter limits capture to the target framerate since -D
+        # delivers frames at compositor rate (typically 60fps).
         bitrate_bps = bitrate_num * 1000000
         bitrate_kbps = bitrate_num * 1000
 
@@ -615,11 +617,16 @@ user_pref("dom.disable_window_move_resize", false);
             wf_encoder = "libx264"
             wf_codec_params = [
                 "-p", "profile=high",
-                "-p", "preset=fast",
+                "-p", "preset=veryfast",
                 "-p", f"b={bitrate_bps}",
                 "-p", f"g={gop_size}",
-                "-p", f"x264-params=vbv-maxrate={bitrate_kbps}"
-                      f":vbv-bufsize={bitrate_kbps}",
+                # Override wf-recorder's tune=zerolatency: re-enable B-frames,
+                # lookahead, and MB-tree for much better motion quality. 1s of
+                # latency is acceptable for multicast playout.
+                "-p", f"x264-params=rc-lookahead=20"
+                      f":bframes=2:b-adapt=1"
+                      f":vbv-maxrate={bitrate_kbps}"
+                      f":vbv-bufsize={bitrate_kbps * 2}",
             ]
 
         # Build the filter chain: fps limiter first (drops excess frames
