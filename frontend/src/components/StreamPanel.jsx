@@ -571,7 +571,7 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
           The iframe is only rendered after a HEAD probe confirms websockify is listening,
           which prevents the 502 Bad Gateway flash during source startup.
         */}
-        {isContainerBased && isRunning && (
+        {isContainerBased && (isRunning || busy) && (
           <div className="browser-preview">
             <div className="config-header">
               <h3>{isPresentation ? 'Live Presentation View' : 'Live Browser View (interactive)'}</h3>
