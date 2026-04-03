@@ -571,12 +571,12 @@ export default function StreamPanel({ streams, selectedStreamId, onSelectStream,
           The iframe is only rendered after a HEAD probe confirms websockify is listening,
           which prevents the 502 Bad Gateway flash during source startup.
         */}
-        {isContainerBased && isRunning && novncPort && (
+        {isContainerBased && isRunning && (
           <div className="browser-preview">
             <div className="config-header">
               <h3>{isPresentation ? 'Live Presentation View' : 'Live Browser View (interactive)'}</h3>
             </div>
-            {novncReady ? (
+            {novncPort && novncReady ? (
               <div className="novnc-wrapper">
                 <iframe
                   src={novncUrl}
