@@ -11,7 +11,7 @@
 # packages, etc.) and overwrite config files with the latest versions.
 #
 # Usage:   sudo bash deploy.sh
-# Custom:  MCS_ADMIN_PASS=secret sudo -E bash deploy.sh
+# Custom:  MCS_ADMIN_PASS=secret MCS_HOSTNAME=nyy-mediacaster.yankees.com sudo -E bash deploy.sh
 #
 # ===========================================================================
 
@@ -456,29 +456,68 @@ fi
 # Add a static route for the multicast address range so the kernel knows
 # which interface to send multicast packets out on. Without this, multicast
 # traffic may go to the loopback interface or be dropped entirely, depending
-# on the routing table. We persist it to survive reboots.
-# Add multicast route for the current session
-if ! ip route show | grep -q "239.0.0.0/8"; then
-    PRIMARY_IFACE=$(ip route get 1.1.1.1 | awk '{print $5; exit}')
-    if [[ -n "${PRIMARY_IFACE}" ]]; then
-        ip route add 239.0.0.0/8 dev "${PRIMARY_IFACE}" 2>/dev/null || true
-        log_info "Multicast route added via ${PRIMARY_IFACE}"
-    fi
+# on the routing table. We detect the primary physical NIC and ensure the
+# route points there (not loopback). We persist it to survive reboots.
+PRIMARY_IFACE=$(ip route get 1.1.1.1 | awk '{print $5; exit}')
+if [[ -n "${PRIMARY_IFACE}" ]]; then
+    # Remove any existing multicast route (may be pointing at loopback)
+    ip route del 239.0.0.0/8 2>/dev/null || true
+    ip route add 239.0.0.0/8 dev "${PRIMARY_IFACE}" 2>/dev/null || true
+    log_info "Multicast route set to ${PRIMARY_IFACE}"
 fi
 
 # Persist the multicast route across reboots via a NetworkManager dispatcher
 # script. This is more reliable than /etc/sysconfig/network-scripts/ which
-# is deprecated on AL9+ and unreliable with NetworkManager.
+# is deprecated on AL9+ and unreliable with NetworkManager. The script
+# filters out loopback to prevent the route from pointing at lo.
 DISPATCHER="/etc/NetworkManager/dispatcher.d/99-multicast-route"
-if [[ ! -f "${DISPATCHER}" ]]; then
-    cat > "${DISPATCHER}" << 'DISPATCH'
+cat > "${DISPATCHER}" << 'DISPATCH'
 #!/bin/bash
-if [ "$2" = "up" ]; then
-    ip route add 239.0.0.0/8 dev "$1" 2>/dev/null || true
+# Add multicast route when a physical interface comes up.
+# Filter out loopback — multicast must go to a real NIC.
+IFACE="$1"
+ACTION="$2"
+if [ "$ACTION" = "up" ] && [ "$IFACE" != "lo" ]; then
+    /usr/sbin/ip route replace 239.0.0.0/8 dev "$IFACE"
 fi
 DISPATCH
-    chmod 755 "${DISPATCHER}"
-    log_info "Installed NetworkManager dispatcher for multicast route persistence"
+chmod 755 "${DISPATCHER}"
+log_info "Installed NetworkManager dispatcher for multicast route persistence"
+
+# ---------------------------------------------------------------------------
+# Network tuning for multicast streaming
+# ---------------------------------------------------------------------------
+log_info "Applying network sysctl tuning for multicast streaming..."
+cat > /etc/sysctl.d/90-mediacaster.conf << 'SYSCTL'
+# Mediacaster — multicast streaming network tuning.
+# Default kernel UDP buffers (212 KB) are too small for multiple MPEG-TS
+# streams — a single 8 Mbps stream can burst above that. Increase to 16 MB
+# max and 1 MB default. Also raise IGMP membership limit for many multicast
+# groups and increase netdev_budget for higher packet throughput.
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+net.core.rmem_default = 1048576
+net.core.wmem_default = 1048576
+net.ipv4.igmp_max_memberships = 256
+net.core.netdev_budget = 600
+SYSCTL
+sysctl -p /etc/sysctl.d/90-mediacaster.conf
+log_info "Network sysctl tuning applied"
+
+# Set the tuned profile to throughput-performance — the default "balanced"
+# profile enables CPU frequency scaling and trades latency for power savings,
+# which is wrong for a real-time streaming appliance. throughput-performance
+# disables power-saving governors and optimizes for sustained workloads.
+if command -v tuned-adm &>/dev/null; then
+    tuned-adm profile throughput-performance
+    log_info "Tuned profile: $(tuned-adm active)"
+fi
+
+# Set the hostname if MCS_HOSTNAME is provided. This allows deploy.sh to
+# configure the FQDN for the appliance (e.g., nyy-mediacaster.yankees.com).
+if [[ -n "${MCS_HOSTNAME:-}" ]]; then
+    hostnamectl set-hostname "${MCS_HOSTNAME}"
+    log_info "Hostname set to: ${MCS_HOSTNAME}"
 fi
 
 # ---------------------------------------------------------------------------
@@ -665,7 +704,8 @@ echo -e "  Service management:"
 echo -e "    systemctl {start|stop|restart} multicast-streamer"
 echo -e "    journalctl -u multicast-streamer -f"
 echo ""
-echo -e "  Config overrides: MCS_SECRET_KEY, MCS_ADMIN_PASS, MCS_TRANSCODE_RESOLUTION"
+echo -e "  Deploy-time:    MCS_HOSTNAME, MCS_ADMIN_PASS"
+echo -e "  Runtime:        MCS_SECRET_KEY, MCS_TRANSCODE_RESOLUTION"
 echo -e "  Set via: sudo systemctl edit multicast-streamer"
 echo ""
 echo -e "${GREEN}═══════════════════════════════════════════════════════════${NC}"
