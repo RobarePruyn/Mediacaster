@@ -354,13 +354,22 @@ class WaylandManager:
             "--ozone-platform=wayland",
             # No sandbox — running as dedicated mcs service user
             "--no-sandbox",
-            # Vulkan SwiftShader: software WebGL without a real GPU.
-            # AlmaLinux Chromium ships libvk_swiftshader.so (Vulkan) but
-            # not the ANGLE SwiftShader library, so we route ANGLE through
-            # Vulkan SwiftShader for WebGL support.
+            # Software rendering fallback for WebGL.
+            # NOTE: Previously we also passed --use-vulkan=swiftshader and
+            # --enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE to
+            # route compositing through Vulkan SwiftShader. Under cage's
+            # headless Wayland output, Chromium's viz compositor failed to
+            # create a Vulkan surface ("skia_output_device_vulkan.cc:301
+            # Failed to create vulkan surface"), which left pages that rely
+            # on GPU compositing (anything doing continuous paint — live
+            # clocks, canvas radar, etc.) rendering as a blank white
+            # surface. Static pages like google.com still worked because
+            # they don't trigger recomposition.
+            # Dropping the Vulkan flags lets Chromium fall back to its
+            # default (non-Vulkan) compositor path, which works fine
+            # against cage. --enable-unsafe-swiftshader alone still
+            # provides software WebGL for canvas/WebGL content.
             "--enable-unsafe-swiftshader",
-            "--use-vulkan=swiftshader",
-            "--enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE",
             # Window geometry
             f"--window-size={width},{height}",
             # Disposable profile
