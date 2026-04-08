@@ -2,6 +2,8 @@
 __pycache__/
 *.pyc
 venv/
+.venv/
+.envrc
 
 # Node
 frontend/node_modules/
