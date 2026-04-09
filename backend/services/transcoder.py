@@ -175,7 +175,21 @@ def _get_codec_flags(codec: str, bitrate: str, resolution: str,
             "-maxrate", bitrate,
             "-bufsize", f"{int(float(bitrate_num) * 2)}M" if "M" in bitrate else bufsize,
             "-pix_fmt", "yuv420p",
+            # Deterministic GOP structure for clean multicast playout:
+            # - Keyframe every `framerate` frames (1s) so receivers joining
+            #   mid-stream or recovering from packet loss resync in ≤1s.
+            # - keyint_min == keyint disallows shorter GOPs.
+            # - sc_threshold=0 disables scene-cut keyframes (GOP stays regular).
+            # - repeat-headers=1 embeds SPS/PPS in the bitstream at every
+            #   keyframe so MP4→MPEG-TS remux (`-c copy`) produces a stream
+            #   that late joiners can decode without waiting for extradata.
+            # - open-gop=0 forces closed GOPs — no inter-GOP frame deps,
+            #   required for safe mid-stream join.
             "-g", str(framerate),
+            "-keyint_min", str(framerate),
+            "-sc_threshold", "0",
+            "-x264-params", "keyint=%d:min-keyint=%d:scenecut=0:"
+                            "repeat-headers=1:open-gop=0" % (framerate, framerate),
         ]
 
 

@@ -182,6 +182,15 @@ class StreamManager:
             "-f", "concat", "-safe", "0", "-i", concat_path,
             # Stream copy — no re-encoding, just remuxing into MPEG-TS
             "-c:v", "copy", "-c:a", "copy",
+            # dump_extra forces SPS/PPS (and any other extradata NAL units) to
+            # be written into the elementary stream at every keyframe during
+            # remux. Without this, MP4→MPEG-TS `-c copy` relies on the muxer
+            # injecting headers only at the first keyframe of each input loop,
+            # so a receiver that joins mid-loop (or recovers from a dropped
+            # packet) stays broken for up to one full loop period. This fixes
+            # macroblocking on late-join and packet-loss recovery without
+            # needing to re-transcode existing assets.
+            "-bsf:v", "dump_extra",
             "-f", "mpegts",
             # Transport stream ID embedded in the TS headers (for receiver identification)
             "-mpegts_transport_stream_id", "1",
