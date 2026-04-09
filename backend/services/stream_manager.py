@@ -207,10 +207,15 @@ class StreamManager:
             # already decoded).
             #
             # -muxrate forces CBR output by padding with null TS packets;
-            # must be higher than the peak video+audio bitrate plus
-            # section overhead. 15 Mbps covers our 11 Mbps 1080p60 peak
-            # with safe headroom. TODO: derive from per-stream config.
-            "-muxrate", "15M",
+            # must exceed peak video+audio bitrate plus section overhead.
+            # Our transcoder's 1080p60 h264 rendition targets 12 Mbps CBR
+            # (HRD-constrained), plus ~200 kbps audio and PSI overhead.
+            # 18 Mbps gives ~6 Mbps of null-packet stuffing headroom,
+            # which is what professional IPTV encoders target — pro
+            # decoders prefer a generously stuffed CBR transport so
+            # their PCR PLL stays locked. TODO: derive from per-stream
+            # config once we support variable rendition bitrates.
+            "-muxrate", "18M",
             # PCR every 20 ms is the broadcast standard (DVB requires
             # <=40 ms, ATSC <=100 ms, but 20 ms is what professional
             # encoders emit).

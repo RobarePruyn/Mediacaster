@@ -165,31 +165,62 @@ def _get_codec_flags(codec: str, bitrate: str, resolution: str,
             "-pix_fmt", "yuv420p",
         ]
     else:
-        # libx264 standard CBR-like flags
-        bufsize = f"{bitrate_num}M" if "M" in bitrate or "m" in bitrate else f"{bitrate_num}k"
+        # libx264 strict HRD-CBR encoder for hardware broadcast decoders.
+        #
+        # The initial transcoder emitted loose VBR ("-b:v X -maxrate X
+        # -bufsize 2X") which software decoders (ffmpeg, VLC) accept but
+        # broadcast decoders like VITEC EP6 reject — loose VBV lets x264
+        # emit keyframes that briefly exceed the decoder's STD buffer,
+        # causing partial-frame corruption (macroblocking on the bottom
+        # slices of every frame until the next GOP refresh).
+        #
+        # This build enforces true HRD-CBR with vbv-bufsize == vbv-maxrate
+        # via nal-hrd=cbr so the bitstream carries VBV HRD parameters and
+        # x264 sizes every frame to fit the buffer. Combined with the
+        # muxrate/PCR settings in stream_manager.py this produces a
+        # broadcast-compliant MPEG-TS.
+        #
+        # Numeric bitrate in kbps for x264-params (which wants kbps).
+        if "M" in bitrate or "m" in bitrate:
+            bitrate_kbps = int(float(bitrate_num) * 1000)
+        else:
+            bitrate_kbps = int(bitrate_num)
+        bufsize_mb = f"{int(float(bitrate_num))}M" if "M" in bitrate or "m" in bitrate else f"{bitrate_num}k"
+        x264_params = (
+            f"nal-hrd=cbr:"
+            f"vbv-maxrate={bitrate_kbps}:"
+            f"vbv-bufsize={bitrate_kbps}:"  # bufsize == maxrate for strict CBR
+            f"keyint={framerate}:"          # ~1 second GOP (fast retune)
+            f"min-keyint={framerate}:"      # no shorter GOPs
+            f"scenecut=0:"                  # no scene-cut keyframes
+            f"bframes=2:"                   # modest B-frames (keeps latency low)
+            f"b-adapt=1:"
+            f"ref=3:"                       # reference frames — HW decoders like ≤4
+            f"repeat-headers=1:"            # SPS/PPS at every keyframe
+            f"open-gop=0:"                  # closed GOPs
+            f"aud=1:"                       # access unit delimiters (broadcast required)
+            f"force-cfr=1:"                 # constant framerate
+            f"filler=1"                     # filler NALs to hit exact CBR rate
+        )
         return [
             "-c:v", "libx264",
-            "-profile:v", "main",
-            "-preset", "slow",
+            # High profile Level 4.2 covers 1080p60 up to 50 Mbps — what
+            # professional broadcast encoders target. Main profile works
+            # but High gives x264 more compression tools so quality at
+            # a given bitrate is noticeably better.
+            "-profile:v", "high",
+            "-level:v", "4.2",
+            "-preset", "medium",            # faster than "slow", matches initial era
+            "-tune", "zerolatency" if framerate >= 60 else "film",
             "-b:v", bitrate,
             "-maxrate", bitrate,
-            "-bufsize", f"{int(float(bitrate_num) * 2)}M" if "M" in bitrate else bufsize,
+            "-minrate", bitrate,            # hard CBR
+            "-bufsize", bufsize_mb,         # VBV bufsize == 1× bitrate (strict)
             "-pix_fmt", "yuv420p",
-            # Deterministic GOP structure for clean multicast playout:
-            # - Keyframe every `framerate` frames (1s) so receivers joining
-            #   mid-stream or recovering from packet loss resync in ≤1s.
-            # - keyint_min == keyint disallows shorter GOPs.
-            # - sc_threshold=0 disables scene-cut keyframes (GOP stays regular).
-            # - repeat-headers=1 embeds SPS/PPS in the bitstream at every
-            #   keyframe so MP4→MPEG-TS remux (`-c copy`) produces a stream
-            #   that late joiners can decode without waiting for extradata.
-            # - open-gop=0 forces closed GOPs — no inter-GOP frame deps,
-            #   required for safe mid-stream join.
             "-g", str(framerate),
             "-keyint_min", str(framerate),
             "-sc_threshold", "0",
-            "-x264-params", "keyint=%d:min-keyint=%d:scenecut=0:"
-                            "repeat-headers=1:open-gop=0" % (framerate, framerate),
+            "-x264-params", x264_params,
         ]
 
 

@@ -620,18 +620,37 @@ class WaylandManager:
             ]
         else:
             wf_encoder = "libx264"
+            # Strict HRD-CBR x264 parameters for broadcast decoders.
+            # Matches the transcoder's x264 build: vbv-bufsize == vbv-maxrate,
+            # nal-hrd=cbr, scenecut=0, closed GOPs, repeated headers,
+            # access unit delimiters, filler NALs. Without these wf-recorder
+            # produces a valid-but-loose bitstream that hardware decoders
+            # (VITEC EP6, Harmonic) show with lower-half macroblocking
+            # because keyframes briefly blow the STD buffer.
+            x264_params = (
+                f"nal-hrd=cbr"
+                f":vbv-maxrate={bitrate_kbps}"
+                f":vbv-bufsize={bitrate_kbps}"   # strict CBR (was 2× = VBR)
+                f":keyint={gop_size}"
+                f":min-keyint={gop_size}"
+                f":scenecut=0"
+                f":bframes=2"
+                f":b-adapt=1"
+                f":ref=3"
+                f":rc-lookahead=20"
+                f":repeat-headers=1"              # SPS/PPS at every keyframe
+                f":open-gop=0"                    # closed GOPs
+                f":aud=1"                         # access unit delimiters
+                f":force-cfr=1"
+                f":filler=1"                      # filler NALs → exact CBR
+            )
             wf_codec_params = [
                 "-p", "profile=high",
-                "-p", "preset=veryfast",
+                "-p", "level=4.2",
+                "-p", "preset=medium",            # was veryfast — better RC
                 "-p", f"b={bitrate_bps}",
                 "-p", f"g={gop_size}",
-                # Override wf-recorder's tune=zerolatency: re-enable B-frames,
-                # lookahead, and MB-tree for much better motion quality. 1s of
-                # latency is acceptable for multicast playout.
-                "-p", f"x264-params=rc-lookahead=20"
-                      f":bframes=2:b-adapt=1"
-                      f":vbv-maxrate={bitrate_kbps}"
-                      f":vbv-bufsize={bitrate_kbps * 2}",
+                "-p", f"x264-params={x264_params}",
             ]
 
         # Build the filter chain: fps limiter first (drops excess frames
@@ -664,15 +683,23 @@ class WaylandManager:
 
         # ffmpeg remuxer: read FIFO, passthrough video, output CBR multicast.
         # -muxrate sets the total TS bitrate (video + null padding).
-        # Set to 1.5x the video bitrate to leave room for I-frame overhead.
+        # 1.5x the video bitrate leaves generous null-stuffing headroom,
+        # which keeps the hardware decoder's PCR PLL happy. Matches the
+        # playlist sender's transport-compliance flags (pat/sdt period,
+        # resend_headers, pat_pmt_at_frames).
         muxrate = int(bitrate_bps * 1.5)
         ffmpeg_parts = [
             "ffmpeg", "-re",
             "-fflags", "+genpts",
             "-i", fifo_path,
             "-c", "copy",
+            "-bsf:v", "dump_extra",
             "-muxrate", str(muxrate),
             "-pcr_period", "20",
+            "-pat_period", "0.1",
+            "-sdt_period", "0.5",
+            "-mpegts_flags", "+resend_headers+pat_pmt_at_frames",
+            "-mpegts_transport_stream_id", "1",
             "-f", "mpegts", multicast_url,
         ]
 
