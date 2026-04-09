@@ -185,15 +185,16 @@ class StreamManager:
             "-f", "concat", "-safe", "0", "-i", concat_path,
             # Stream copy — no re-encoding, just remuxing into MPEG-TS
             "-c:v", "copy", "-c:a", "copy",
-            # dump_extra forces SPS/PPS (and any other extradata NAL units) to
-            # be written into the elementary stream at every keyframe during
-            # remux. Without this, MP4→MPEG-TS `-c copy` relies on the muxer
-            # injecting headers only at the first keyframe of each input loop,
-            # so a receiver that joins mid-loop (or recovers from a dropped
-            # packet) stays broken for up to one full loop period. This fixes
-            # macroblocking on late-join and packet-loss recovery without
-            # needing to re-transcode existing assets.
-            "-bsf:v", "dump_extra",
+            # dump_extra with freq=all inserts SPS/PPS before EVERY access
+            # unit (not just keyframes). This is critical for packet-loss
+            # resilience on broadcast multicast: if any TS packet is lost,
+            # the decoder can resync at the next frame (~17ms) instead of
+            # waiting for the next IDR keyframe (~1 second). The default
+            # freq=keyframe only emits headers at IDRs, so a single lost
+            # packet mid-GOP causes up to 1 full second of macroblocking
+            # on hardware decoders like the VITEC EP6. freq=all trades
+            # ~0.5% bitrate overhead for near-instant loss recovery.
+            "-bsf:v", "dump_extra=freq=all",
             "-f", "mpegts",
             # ---- Hardware-decoder-friendly MPEG-TS transport compliance ----
             # Professional decoders (VITEC EP6, Harmonic, Ateme, etc.) are

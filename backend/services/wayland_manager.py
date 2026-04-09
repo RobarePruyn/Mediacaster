@@ -693,7 +693,9 @@ class WaylandManager:
             "-fflags", "+genpts",
             "-i", fifo_path,
             "-c", "copy",
-            "-bsf:v", "dump_extra",
+            # freq=all: SPS/PPS at every access unit for packet-loss
+            # resilience (see stream_manager.py for rationale).
+            "-bsf:v", "dump_extra=freq=all",
             "-muxrate", str(muxrate),
             "-pcr_period", "20",
             "-pat_period", "0.1",
