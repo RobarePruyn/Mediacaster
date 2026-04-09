@@ -174,7 +174,10 @@ class StreamManager:
         host_ip = _detect_host_multicast_ip()
         if host_ip:
             url += f"&localaddr={host_ip}"
-        cmd = [config.FFMPEG_PATH, "-y", "-re"]
+        # +genpts regenerates PTS on inputs that lack them, and more
+        # importantly ensures monotonic PTS across concat loop boundaries so
+        # downstream hardware decoders don't see a timestamp jump.
+        cmd = [config.FFMPEG_PATH, "-y", "-fflags", "+genpts", "-re"]
         if stream.playback_mode == PlaybackMode.LOOP:
             # -stream_loop -1 tells ffmpeg to loop the concat input infinitely
             cmd += ["-stream_loop", "-1"]
@@ -192,6 +195,35 @@ class StreamManager:
             # needing to re-transcode existing assets.
             "-bsf:v", "dump_extra",
             "-f", "mpegts",
+            # ---- Hardware-decoder-friendly MPEG-TS transport compliance ----
+            # Professional decoders (VITEC EP6, Harmonic, Ateme, etc.) are
+            # strict about transport layer: they require a constant-bitrate
+            # TS with regularly-placed PCRs and frequent PAT/PMT. Without
+            # these flags ffmpeg's mpegts muxer emits VBR with irregular
+            # PCR — software decoders like ffmpeg/VLC don't care, but
+            # hardware decoders enter STD buffer underrun and display
+            # partial frames (classic "lower half macroblocks" symptom as
+            # late-arriving slice NALs get dropped while upper slices
+            # already decoded).
+            #
+            # -muxrate forces CBR output by padding with null TS packets;
+            # must be higher than the peak video+audio bitrate plus
+            # section overhead. 15 Mbps covers our 11 Mbps 1080p60 peak
+            # with safe headroom. TODO: derive from per-stream config.
+            "-muxrate", "15M",
+            # PCR every 20 ms is the broadcast standard (DVB requires
+            # <=40 ms, ATSC <=100 ms, but 20 ms is what professional
+            # encoders emit).
+            "-pcr_period", "20",
+            # PAT/PMT every 100 ms — faster than ffmpeg's 500 ms default
+            # so hardware decoders acquire the program quickly.
+            "-pat_period", "0.1",
+            "-sdt_period", "0.5",
+            # resend_headers: re-emit SPS/PPS/SDT at every keyframe.
+            # pat_pmt_at_frames: align PAT/PMT emission with video
+            # access units so fresh receivers always have section info
+            # in front of the first decodable frame.
+            "-mpegts_flags", "+resend_headers+pat_pmt_at_frames",
             # Transport stream ID embedded in the TS headers (for receiver identification)
             "-mpegts_transport_stream_id", "1",
             # Service name appears in TS metadata — receivers/decoders can display this
