@@ -193,9 +193,12 @@ def _get_codec_flags(codec: str, bitrate: str, resolution: str,
             f"keyint={framerate}:"          # ~1 second GOP (fast retune)
             f"min-keyint={framerate}:"      # no shorter GOPs
             f"scenecut=0:"                  # no scene-cut keyframes
-            f"bframes=2:"                   # modest B-frames (keeps latency low)
+            f"bframes=2:"                   # modest B-frames
             f"b-adapt=1:"
             f"ref=3:"                       # reference frames — HW decoders like ≤4
+            f"rc-lookahead=40:"             # look-ahead for smooth CBR rate control
+            f"threads=auto:"               # frame-based threading (not sliced)
+            f"sliced-threads=0:"            # disable per-slice threading explicitly
             f"repeat-headers=1:"            # SPS/PPS at every keyframe
             f"open-gop=0:"                  # closed GOPs
             f"aud=1:"                       # access unit delimiters (broadcast required)
@@ -210,8 +213,14 @@ def _get_codec_flags(codec: str, bitrate: str, resolution: str,
             # a given bitrate is noticeably better.
             "-profile:v", "high",
             "-level:v", "4.2",
-            "-preset", "medium",            # faster than "slow", matches initial era
-            "-tune", "zerolatency" if framerate >= 60 else "film",
+            "-preset", "medium",
+            # No -tune flag. The previous -tune zerolatency was causing
+            # macroblocking on hardware decoders: it forces sliced-threads
+            # (per-slice rate control that violates the VBV model),
+            # rc-lookahead=0 (blind frame-by-frame QP decisions), and
+            # mbtree=0 — all incompatible with strict CBR for broadcast.
+            # This is an offline transcoder so encoding latency is
+            # irrelevant. rc-lookahead=40 is set in x264-params above.
             "-b:v", bitrate,
             "-maxrate", bitrate,
             "-minrate", bitrate,            # hard CBR

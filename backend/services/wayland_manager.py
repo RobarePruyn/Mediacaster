@@ -689,8 +689,21 @@ class WaylandManager:
         # resend_headers, pat_pmt_at_frames).
         muxrate = int(bitrate_bps * 1.5)
         ffmpeg_parts = [
-            "ffmpeg", "-re",
-            "-fflags", "+genpts",
+            # No -re flag here. Unlike the playlist sender (which reads
+            # pre-encoded files and needs -re to pace them in real time),
+            # this remuxer reads live-captured frames from a FIFO. The
+            # frames arrive in real time from wf-recorder already, so -re
+            # would double-pace: it reads PTS from the input and inserts
+            # sleeps to match, but wf-recorder's screencopy-driven PTS
+            # are inherently jittery (no hardware genlock). The result is
+            # -re reproducing that jitter in the output — frames arrive in
+            # bursts with gaps, causing visible stutter on receivers.
+            # Transport-layer pacing is handled entirely by -muxrate,
+            # which inserts null TS packets to maintain a constant bitrate
+            # wire rate with regular PCR insertion. This is the same
+            # mechanism professional IRDs rely on for clock recovery.
+            "ffmpeg",
+            "-fflags", "+genpts+igndts",
             "-i", fifo_path,
             "-c", "copy",
             # freq=all: SPS/PPS at every access unit for packet-loss
