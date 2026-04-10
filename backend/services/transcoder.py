@@ -165,71 +165,24 @@ def _get_codec_flags(codec: str, bitrate: str, resolution: str,
             "-pix_fmt", "yuv420p",
         ]
     else:
-        # libx264 strict HRD-CBR encoder for hardware broadcast decoders.
-        #
-        # The initial transcoder emitted loose VBR ("-b:v X -maxrate X
-        # -bufsize 2X") which software decoders (ffmpeg, VLC) accept but
-        # broadcast decoders like VITEC EP6 reject — loose VBV lets x264
-        # emit keyframes that briefly exceed the decoder's STD buffer,
-        # causing partial-frame corruption (macroblocking on the bottom
-        # slices of every frame until the next GOP refresh).
-        #
-        # This build enforces true HRD-CBR with vbv-bufsize == vbv-maxrate
-        # via nal-hrd=cbr so the bitstream carries VBV HRD parameters and
-        # x264 sizes every frame to fit the buffer. Combined with the
-        # muxrate/PCR settings in stream_manager.py this produces a
-        # broadcast-compliant MPEG-TS.
-        #
-        # Numeric bitrate in kbps for x264-params (which wants kbps).
-        if "M" in bitrate or "m" in bitrate:
-            bitrate_kbps = int(float(bitrate_num) * 1000)
-        else:
-            bitrate_kbps = int(bitrate_num)
-        bufsize_mb = f"{int(float(bitrate_num))}M" if "M" in bitrate or "m" in bitrate else f"{bitrate_num}k"
-        x264_params = (
-            f"nal-hrd=cbr:"
-            f"vbv-maxrate={bitrate_kbps}:"
-            f"vbv-bufsize={bitrate_kbps}:"  # bufsize == maxrate for strict CBR
-            f"keyint={framerate}:"          # ~1 second GOP (fast retune)
-            f"min-keyint={framerate}:"      # no shorter GOPs
-            f"scenecut=0:"                  # no scene-cut keyframes
-            f"bframes=2:"                   # modest B-frames
-            f"b-adapt=1:"
-            f"ref=3:"                       # reference frames — HW decoders like ≤4
-            f"rc-lookahead=40:"             # look-ahead for smooth CBR rate control
-            f"threads=auto:"               # frame-based threading (not sliced)
-            f"sliced-threads=0:"            # disable per-slice threading explicitly
-            f"repeat-headers=1:"            # SPS/PPS at every keyframe
-            f"open-gop=0:"                  # closed GOPs
-            f"aud=1:"                       # access unit delimiters (broadcast required)
-            f"force-cfr=1:"                 # constant framerate
-            f"filler=1"                     # filler NALs to hit exact CBR rate
-        )
+        # Reverted to the original simple libx264 config that worked
+        # cleanly on VITEC EP6 hardware decoders. Previous iterations
+        # added increasingly strict broadcast flags (nal-hrd=cbr, filler
+        # NALs, forced keyint, dump_extra BSF, muxrate padding) trying to
+        # fix browser-source macroblocking, but those changes actually
+        # introduced macroblocking in the playlist path. The original
+        # Main profile / loose VBR / x264 defaults works because ffmpeg's
+        # mpegts muxer handles the MP4→TS remux correctly when we don't
+        # fight it with conflicting rate-control and BSF overrides.
+        bufsize = f"{int(float(bitrate_num) * 2)}M" if "M" in bitrate or "m" in bitrate else f"{int(float(bitrate_num) * 2)}k"
         return [
             "-c:v", "libx264",
-            # High profile Level 4.2 covers 1080p60 up to 50 Mbps — what
-            # professional broadcast encoders target. Main profile works
-            # but High gives x264 more compression tools so quality at
-            # a given bitrate is noticeably better.
-            "-profile:v", "high",
-            "-level:v", "4.2",
+            "-profile:v", "main",
             "-preset", "medium",
-            # No -tune flag. The previous -tune zerolatency was causing
-            # macroblocking on hardware decoders: it forces sliced-threads
-            # (per-slice rate control that violates the VBV model),
-            # rc-lookahead=0 (blind frame-by-frame QP decisions), and
-            # mbtree=0 — all incompatible with strict CBR for broadcast.
-            # This is an offline transcoder so encoding latency is
-            # irrelevant. rc-lookahead=40 is set in x264-params above.
             "-b:v", bitrate,
             "-maxrate", bitrate,
-            "-minrate", bitrate,            # hard CBR
-            "-bufsize", bufsize_mb,         # VBV bufsize == 1× bitrate (strict)
+            "-bufsize", bufsize,            # 2x bitrate (standard loose VBV)
             "-pix_fmt", "yuv420p",
-            "-g", str(framerate),
-            "-keyint_min", str(framerate),
-            "-sc_threshold", "0",
-            "-x264-params", x264_params,
         ]
 
 

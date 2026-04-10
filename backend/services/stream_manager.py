@@ -174,65 +174,22 @@ class StreamManager:
         host_ip = _detect_host_multicast_ip()
         if host_ip:
             url += f"&localaddr={host_ip}"
-        # +genpts regenerates PTS on inputs that lack them, and more
-        # importantly ensures monotonic PTS across concat loop boundaries so
-        # downstream hardware decoders don't see a timestamp jump.
-        cmd = [config.FFMPEG_PATH, "-y", "-fflags", "+genpts", "-re"]
+        # Reverted to the original simple playout command that worked
+        # cleanly on VITEC EP6 hardware decoders. Previous iterations
+        # added +genpts, dump_extra BSF, -muxrate, -pcr_period,
+        # -pat_period, -mpegts_flags trying to fix browser-source
+        # macroblocking, but those flags interfered with ffmpeg's
+        # default MP4→TS remux behavior and introduced macroblocking
+        # in the playlist path. The bare concat→copy→mpegts pipeline
+        # is what ffmpeg is designed for and what EP6 decoders expect.
+        cmd = [config.FFMPEG_PATH, "-y", "-re"]
         if stream.playback_mode == PlaybackMode.LOOP:
-            # -stream_loop -1 tells ffmpeg to loop the concat input infinitely
             cmd += ["-stream_loop", "-1"]
         cmd += [
             "-f", "concat", "-safe", "0", "-i", concat_path,
-            # Stream copy — no re-encoding, just remuxing into MPEG-TS
             "-c:v", "copy", "-c:a", "copy",
-            # dump_extra with freq=all inserts SPS/PPS before EVERY access
-            # unit (not just keyframes). This is critical for packet-loss
-            # resilience on broadcast multicast: if any TS packet is lost,
-            # the decoder can resync at the next frame (~17ms) instead of
-            # waiting for the next IDR keyframe (~1 second). The default
-            # freq=keyframe only emits headers at IDRs, so a single lost
-            # packet mid-GOP causes up to 1 full second of macroblocking
-            # on hardware decoders like the VITEC EP6. freq=all trades
-            # ~0.5% bitrate overhead for near-instant loss recovery.
-            "-bsf:v", "dump_extra=freq=all",
             "-f", "mpegts",
-            # ---- Hardware-decoder-friendly MPEG-TS transport compliance ----
-            # Professional decoders (VITEC EP6, Harmonic, Ateme, etc.) are
-            # strict about transport layer: they require a constant-bitrate
-            # TS with regularly-placed PCRs and frequent PAT/PMT. Without
-            # these flags ffmpeg's mpegts muxer emits VBR with irregular
-            # PCR — software decoders like ffmpeg/VLC don't care, but
-            # hardware decoders enter STD buffer underrun and display
-            # partial frames (classic "lower half macroblocks" symptom as
-            # late-arriving slice NALs get dropped while upper slices
-            # already decoded).
-            #
-            # -muxrate forces CBR output by padding with null TS packets;
-            # must exceed peak video+audio bitrate plus section overhead.
-            # Our transcoder's 1080p60 h264 rendition targets 12 Mbps CBR
-            # (HRD-constrained), plus ~200 kbps audio and PSI overhead.
-            # 18 Mbps gives ~6 Mbps of null-packet stuffing headroom,
-            # which is what professional IPTV encoders target — pro
-            # decoders prefer a generously stuffed CBR transport so
-            # their PCR PLL stays locked. TODO: derive from per-stream
-            # config once we support variable rendition bitrates.
-            "-muxrate", "18M",
-            # PCR every 20 ms is the broadcast standard (DVB requires
-            # <=40 ms, ATSC <=100 ms, but 20 ms is what professional
-            # encoders emit).
-            "-pcr_period", "20",
-            # PAT/PMT every 100 ms — faster than ffmpeg's 500 ms default
-            # so hardware decoders acquire the program quickly.
-            "-pat_period", "0.1",
-            "-sdt_period", "0.5",
-            # resend_headers: re-emit SPS/PPS/SDT at every keyframe.
-            # pat_pmt_at_frames: align PAT/PMT emission with video
-            # access units so fresh receivers always have section info
-            # in front of the first decodable frame.
-            "-mpegts_flags", "+resend_headers+pat_pmt_at_frames",
-            # Transport stream ID embedded in the TS headers (for receiver identification)
             "-mpegts_transport_stream_id", "1",
-            # Service name appears in TS metadata — receivers/decoders can display this
             "-metadata", f"service_name={stream.name}",
             url,
         ]
