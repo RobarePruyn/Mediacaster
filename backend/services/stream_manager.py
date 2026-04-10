@@ -113,6 +113,15 @@ class StreamManager:
         # Fall back to asset.file_path which points to the first ready rendition
         return asset.file_path
 
+    # Number of times to repeat the playlist in the concat file for loop mode.
+    # Avoids -stream_loop which causes PTS/DTS discontinuities at the loop
+    # boundary that hardware decoders (VITEC EP6) can't handle. When the
+    # concat file is exhausted, the watcher task auto-restarts the stream
+    # (regenerating a fresh concat file), so this effectively loops forever
+    # with clean timestamp continuity within each ffmpeg invocation.
+    # 500 repeats of a typical playlist = many hours of continuous playout.
+    LOOP_REPEATS = 500
+
     def _generate_concat_file(self, stream: Stream, db: Session) -> str:
         """
         Write an ffmpeg concat-demuxer playlist file from the stream's ordered items.
@@ -122,6 +131,12 @@ class StreamManager:
             file '/path/to/asset_1.mp4'
             file '/path/to/asset_2.mp4'
             ...
+
+        In loop mode, the playlist entries are repeated LOOP_REPEATS times
+        in the concat file itself (instead of using -stream_loop). This
+        ensures the concat demuxer handles every file-to-file transition
+        natively with continuous timestamps — no splice point where ffmpeg
+        has to wrap PTS/DTS back to zero.
 
         Only includes assets with READY status and a usable rendition file.
         Single quotes in file paths are escaped for the concat demuxer syntax.
@@ -134,16 +149,26 @@ class StreamManager:
             Filesystem path to the generated concat playlist file
         """
         path = str(config.CONCAT_DIR / f"stream_{stream.id}_playlist.txt")
+
+        # Build the single-pass entry list
+        entries = []
+        for item in sorted(stream.items, key=lambda i: i.position):
+            if item.asset.status != AssetStatus.READY:
+                continue
+            rendition_path = self._select_rendition_path(
+                item.asset, stream.resolution, stream.codec, db)
+            if rendition_path:
+                safe = rendition_path.replace("'", "'\\''")
+                entries.append(f"file '{safe}'\n")
+
+        # In loop mode, repeat the entries many times so a single ffmpeg
+        # invocation plays for hours without needing -stream_loop.
+        repeat_count = self.LOOP_REPEATS if stream.playback_mode == PlaybackMode.LOOP else 1
+
         with open(path, "w") as f:
-            for item in sorted(stream.items, key=lambda i: i.position):
-                if item.asset.status != AssetStatus.READY:
-                    continue
-                rendition_path = self._select_rendition_path(
-                    item.asset, stream.resolution, stream.codec, db)
-                if rendition_path:
-                    # Escape single quotes in paths for ffmpeg concat demuxer format
-                    safe = rendition_path.replace("'", "'\\''")
-                    f.write(f"file '{safe}'\n")
+            for _ in range(repeat_count):
+                for entry in entries:
+                    f.write(entry)
         return path
 
     def _build_playout_cmd(self, concat_path: str, stream: Stream) -> list:
@@ -174,17 +199,14 @@ class StreamManager:
         host_ip = _detect_host_multicast_ip()
         if host_ip:
             url += f"&localaddr={host_ip}"
-        # Reverted to the original simple playout command that worked
-        # cleanly on VITEC EP6 hardware decoders. Previous iterations
-        # added +genpts, dump_extra BSF, -muxrate, -pcr_period,
-        # -pat_period, -mpegts_flags trying to fix browser-source
-        # macroblocking, but those flags interfered with ffmpeg's
-        # default MP4→TS remux behavior and introduced macroblocking
-        # in the playlist path. The bare concat→copy→mpegts pipeline
-        # is what ffmpeg is designed for and what EP6 decoders expect.
+        # No -stream_loop flag. Looping is handled by repeating the playlist
+        # entries in the concat file (see _generate_concat_file). This avoids
+        # the PTS/DTS timestamp discontinuity that -stream_loop creates at
+        # the splice point — hardware decoders (VITEC EP6) macroblock when
+        # they see a backwards DTS jump. With repeated concat entries, every
+        # file transition is handled natively by the concat demuxer with
+        # continuous, monotonic timestamps.
         cmd = [config.FFMPEG_PATH, "-y", "-re"]
-        if stream.playback_mode == PlaybackMode.LOOP:
-            cmd += ["-stream_loop", "-1"]
         cmd += [
             "-f", "concat", "-safe", "0", "-i", concat_path,
             "-c:v", "copy", "-c:a", "copy",
@@ -329,7 +351,10 @@ class StreamManager:
 
         Behavior depends on exit conditions:
           - If should_stop is True: user requested stop, do nothing (stop_stream handles cleanup)
-          - If loop mode and non-zero exit: crash detected, attempt automatic restart after 2s delay
+          - If loop mode: restart regardless of exit code. rc=0 means the concat
+            file was exhausted (normal — we use repeated concat entries instead of
+            -stream_loop), rc!=0 means crash. Either way, restart with a fresh
+            concat file for seamless continuous playout.
           - If non-loop mode (play once): natural completion, mark stream as stopped
 
         The 2-second delay before restart prevents rapid restart loops if ffmpeg is
@@ -344,9 +369,16 @@ class StreamManager:
             if managed.should_stop:
                 # User-initiated stop — stop_stream() handles cleanup
                 return
-            if managed.loop and rc != 0:
-                # Crash in loop mode — attempt automatic restart
-                logger.warning("Stream %d crashed, restarting...", managed.stream_id)
+            if managed.loop:
+                # Loop mode — restart regardless of exit code. rc=0 means the
+                # concat file was exhausted (expected after LOOP_REPEATS cycles),
+                # rc!=0 means crash. Either way, regenerate concat and restart.
+                if rc != 0:
+                    logger.warning("Stream %d crashed (rc=%d), restarting...",
+                                   managed.stream_id, rc)
+                else:
+                    logger.info("Stream %d concat exhausted, restarting loop...",
+                                managed.stream_id)
                 if managed.stream_id in self._active:
                     del self._active[managed.stream_id]
                 # Brief delay to avoid tight restart loops on persistent failures
