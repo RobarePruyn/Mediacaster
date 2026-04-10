@@ -179,6 +179,10 @@ def _get_codec_flags(codec: str, bitrate: str, resolution: str,
             "-c:v", "libx264",
             "-profile:v", "main",
             "-preset", "medium",
+            "-bf", "0",                     # No B-frames: prevents TS muxer from
+                                            # doubling timebase (tbr=120) during
+                                            # MP4→MPEG-TS remux, and ensures
+                                            # DTS==PTS for clean concat transitions
             "-b:v", bitrate,
             "-maxrate", bitrate,
             "-bufsize", bufsize,            # 2x bitrate (standard loose VBV)
