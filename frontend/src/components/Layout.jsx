@@ -93,7 +93,7 @@ export default function Layout({ currentUser, onLogout }) {
       <header className="topbar">
         <div className="topbar-left">
           <span className="topbar-icon">▶</span>
-          <h1 className="topbar-title">Multicast Streamer</h1>
+          <h1 className="topbar-title">MediaCaster</h1>
           <nav className="topbar-nav">
             <button className={`nav-btn ${activeView === 'dashboard' ? 'active' : ''}`}
               onClick={() => setActiveView('dashboard')}>Dashboard</button>

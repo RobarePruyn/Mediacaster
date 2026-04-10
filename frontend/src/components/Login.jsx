@@ -77,8 +77,10 @@ export default function Login({ onLoginSuccess, ssoError }) {
       <div className="login-card">
         <div className="login-header">
           <div className="login-icon">▶</div>
-          <h1>Multicast Streamer</h1>
+          <h1>MediaCaster</h1>
           <p className="login-subtitle">MPEG-TS Multicast Playout System</p>
+          <p className="login-version">v1.0.0</p>
+          <p className="login-copyright">&copy; 2026 Mediacast Network Solutions</p>
         </div>
         <form onSubmit={handleSubmit} className="login-form">
           {error && <div className="login-error">{error}</div>}

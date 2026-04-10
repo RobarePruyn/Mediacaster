@@ -1,4 +1,4 @@
-/* Multicast Streamer — Dark broadcast engineering aesthetic */
+/* MediaCaster — Dark broadcast engineering aesthetic */
 :root {
   --bg-base: #0a0e17; --bg-surface: #111827; --bg-elevated: #1a2235;
   --bg-hover: #1f2a3f; --bg-input: #0d1220;
@@ -64,6 +64,8 @@ body { font-family: var(--font-body); font-size: 14px; line-height: 1.5; color: 
 .login-icon { display: inline-flex; align-items: center; justify-content: center; width: 48px; height: 48px; background: var(--accent-muted); color: var(--accent); border-radius: var(--radius-md); font-size: 20px; margin-bottom: 16px; }
 .login-header h1 { font-size: 20px; font-weight: 700; margin-bottom: 4px; }
 .login-subtitle { font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.08em; }
+.login-version { font-size: 11px; color: var(--text-muted); margin-top: 8px; opacity: 0.6; }
+.login-copyright { font-size: 10px; color: var(--text-muted); margin-top: 2px; opacity: 0.5; }
 .login-form .form-group { margin-bottom: 16px; }
 .login-error { padding: 10px 12px; background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.25); border-radius: var(--radius-sm); color: var(--status-error); font-size: 13px; margin-bottom: 16px; }
 .login-btn { width: 100%; padding: 10px; font-size: 14px; margin-top: 8px; }
