@@ -144,8 +144,12 @@ def validate_stream_profile(source_type: str, resolution: str, codec: str,
 
 
 def get_transcode_ladder(native_width: int, native_height: int,
-                         ladder_config: dict) -> list[tuple[str, str]]:
+                         ladder_config: dict) -> list[tuple[str, str, int]]:
     """Determine which renditions to generate based on native resolution and config.
+
+    Each enabled resolution/codec tier produces both a 30fps and 60fps rendition
+    so that streams configured at either framerate can use -c copy without
+    frame rate conversion at playout time.
 
     Args:
         native_width: Source video width in pixels
@@ -154,7 +158,7 @@ def get_transcode_ladder(native_width: int, native_height: int,
                        {"720p_h264": True, "1080p_h264": True, "1080p_h265": False, "4k_h265": False}
 
     Returns:
-        List of (resolution, codec) tuples to transcode, ordered highest to lowest
+        List of (resolution, codec, framerate) tuples to transcode
     """
     # Classify native resolution into a tier
     if native_width >= 3840 or native_height >= 2160:
@@ -183,12 +187,15 @@ def get_transcode_ladder(native_width: int, native_height: int,
         # Skip renditions disabled in the ladder config
         if not ladder_config.get(config_key, False):
             continue
-        renditions.append((res, codec))
+        # Generate both 30fps and 60fps for each tier
+        renditions.append((res, codec, 30))
+        renditions.append((res, codec, 60))
 
     # Always include at least one rendition at native resolution with H.264
     # even if nothing is enabled in the config (safety fallback)
     if not renditions:
-        renditions.append((native_tier, "h264"))
+        renditions.append((native_tier, "h264", 30))
+        renditions.append((native_tier, "h264", 60))
 
     return renditions
 

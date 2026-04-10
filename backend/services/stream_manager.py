@@ -73,18 +73,21 @@ class StreamManager:
         return stream_id in self._active
 
     def _select_rendition_path(self, asset, target_resolution: str,
-                               target_codec: str, db: Session) -> str | None:
+                               target_codec: str, target_framerate: int,
+                               db: Session) -> str | None:
         """Find the best rendition file for a given stream encoding profile.
 
         Selection priority:
-          1. Exact match on resolution + codec
-          2. Same resolution, any codec (e.g. stream wants h265 but only h264 exists)
-          3. Fall back to asset.file_path (legacy single-file or first ready rendition)
+          1. Exact match on resolution + codec + framerate
+          2. Exact resolution + codec, any framerate
+          3. Same resolution, any codec/framerate
+          4. Fall back to asset.file_path (legacy single-file or first ready rendition)
 
         Args:
             asset: Asset ORM object
             target_resolution: Stream's configured resolution (e.g. "1920x1080")
             target_codec: Stream's configured codec ("h264" or "h265")
+            target_framerate: Stream's configured framerate (30 or 60)
             db: Active database session
 
         Returns:
@@ -99,18 +102,23 @@ class StreamManager:
             # No renditions yet (legacy asset) — use the old file_path
             return asset.file_path
 
-        # Priority 1: exact match
+        # Priority 1: exact match on resolution + codec + framerate
+        for r in renditions:
+            if (r.resolution == target_resolution and r.codec == target_codec
+                    and r.framerate == target_framerate):
+                return r.file_path
+
+        # Priority 2: resolution + codec match, any framerate
         for r in renditions:
             if r.resolution == target_resolution and r.codec == target_codec:
                 return r.file_path
 
-        # Priority 2: same resolution, different codec
+        # Priority 3: same resolution, different codec
         for r in renditions:
             if r.resolution == target_resolution:
                 return r.file_path
 
-        # Priority 3: any ready rendition (prefer closest resolution)
-        # Fall back to asset.file_path which points to the first ready rendition
+        # Priority 4: any ready rendition
         return asset.file_path
 
     # Number of times to repeat the playlist in the concat file for loop mode.
@@ -156,7 +164,8 @@ class StreamManager:
             if item.asset.status != AssetStatus.READY:
                 continue
             rendition_path = self._select_rendition_path(
-                item.asset, stream.resolution, stream.codec, db)
+                item.asset, stream.resolution, stream.codec,
+                stream.framerate, db)
             if rendition_path:
                 safe = rendition_path.replace("'", "'\\''")
                 entries.append(f"file '{safe}'\n")

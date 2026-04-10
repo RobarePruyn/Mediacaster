@@ -430,7 +430,7 @@ async def _do_transcode(asset_id: int, db_session_factory) -> None:
         renditions = get_transcode_ladder(native_width, native_height, ladder_config)
         logger.info("Asset %d: native %dx%d, generating %d renditions: %s",
                      asset_id, native_width, native_height, len(renditions),
-                     [(r, c) for r, c in renditions])
+                     [(r, c, f) for r, c, f in renditions])
 
         # Track total progress across all renditions
         total_renditions = len(renditions)
@@ -438,14 +438,14 @@ async def _do_transcode(asset_id: int, db_session_factory) -> None:
         any_success = False
         first_ready_path = None
 
-        for resolution, codec in renditions:
+        for resolution, codec, framerate in renditions:
             # Create rendition record
-            bitrate = get_effective_bitrate(resolution, LADDER_FRAMERATE, codec)
+            bitrate = get_effective_bitrate(resolution, framerate, codec)
             rendition = AssetRendition(
                 asset_id=asset_id,
                 resolution=resolution,
                 codec=codec,
-                framerate=LADDER_FRAMERATE,
+                framerate=framerate,
                 status=RenditionStatus.PROCESSING,
                 transcode_progress=0.0,
             )
@@ -453,29 +453,29 @@ async def _do_transcode(asset_id: int, db_session_factory) -> None:
             db.commit()
             db.refresh(rendition)
 
-            # Build output path: asset_{id}_{resolution}_{codec}.mp4
+            # Build output path includes framerate to distinguish 30/60fps renditions
             res_label = resolution.replace("x", "_")
-            out_filename = f"asset_{asset_id}_{res_label}_{codec}.mp4"
+            out_filename = f"asset_{asset_id}_{res_label}_{codec}_{framerate}fps.mp4"
             out_path = str(config.MEDIA_DIR / out_filename)
 
             logger.info("Asset %d: transcoding rendition %s/%s @ %s %sfps",
-                         asset_id, resolution, codec, bitrate, LADDER_FRAMERATE)
+                         asset_id, resolution, codec, bitrate, framerate)
 
             # Build and run the ffmpeg command
             if is_image:
                 cmd = _image_to_video_cmd(raw_path, out_path, resolution, codec,
-                                           bitrate, LADDER_FRAMERATE)
+                                           bitrate, framerate)
                 rc, _, stderr = await _run_command(cmd)
             elif is_audio:
                 cmd = _audio_to_video_cmd(raw_path, out_path, resolution, codec,
-                                           bitrate, LADDER_FRAMERATE,
+                                           bitrate, framerate,
                                            with_progress=True)
                 rc, stderr = await _run_with_progress(
                     cmd, source_duration, asset_id, db_session_factory,
                     rendition_id=rendition.id)
             else:
                 cmd = _video_transcode_cmd(raw_path, out_path, resolution, codec,
-                                            bitrate, LADDER_FRAMERATE,
+                                            bitrate, framerate,
                                             with_progress=True, has_audio=has_audio)
                 rc, stderr = await _run_with_progress(
                     cmd, source_duration, asset_id, db_session_factory,
